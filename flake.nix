@@ -1,5 +1,5 @@
 {
-  inputs.cache.url = "path:/var/empty";
+  inputs.cache.url = "github:nix-community/lib";
 
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
   outputs =
