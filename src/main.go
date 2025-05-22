@@ -10,7 +10,7 @@ import (
 
 func main() {
 	os.Remove("./foo.db")
-        // hi a b c e f e
+        // hi a b c e f e g asasdfasdfsadasdfasd asd
 
 	db, err := sql.Open("sqlite3", "./foo.db")
 	if err != nil {
