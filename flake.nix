@@ -1,6 +1,6 @@
 {
   inputs.cache.url = "path:/var/empty";
-  inputs.cache.flake = false;
+
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
   outputs =
     { self, nixpkgs, cache, ... }:
@@ -13,7 +13,8 @@
           env.GODEBUG="gocachehash=1";
           outputs = ["out" "intermediates"];
           preBuild = ''
-            cp -r ${cache} $intermediates
+            mkdir empty
+            cp -r ${cache.packages.${system}.thing.intermediates or "empty"} $intermediates
             chmod -R +w $intermediates
             export GOCACHE=$intermediates
           '';
