@@ -1,16 +1,18 @@
 {
   "nodes": {
     "cache": {
-      "flake": false,
       "locked": {
-        "lastModified": 1738078732,
-        "narHash": "sha256-pQpattmS9VmO3ZIQUFn66az8GSmB4IvYhTTCFn6SUmo=",
-        "path": "/var/empty",
-        "type": "path"
+        "lastModified": 1747900736,
+        "narHash": "sha256-92DUzTuAGc2l+s5TVDYiYPj6EHheipa+Ma5PqrMFAC8=",
+        "owner": "tomberek",
+        "repo": "empty",
+        "rev": "df5492251f442fd575e01bd3bb506c2c9cd6b746",
+        "type": "github"
       },
       "original": {
-        "path": "/var/empty",
-        "type": "path"
+        "owner": "tomberek",
+        "repo": "empty",
+        "type": "github"
       }
     },
     "nixpkgs": {
