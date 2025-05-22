@@ -5,11 +5,21 @@
     { self, nixpkgs, garnix, ... }:
     garnix.lib.withCaches  {
       packages = builtins.mapAttrs (system: pkgs: rec {
-        thing = pkgs.buildGoModule {
+        thing = cache: pkgs.buildGoModule {
           name = "thing";
           src = ./src;
           vendorHash = "sha256-5xR9WCkpPpY9D0LR2mcdoOX34RqVpxJjgRwc4GEkGiE=";
           env.GODEBUG="gocachehash=1";
+          outputs = ["out" "intermediates"];
+          preBuild = ''
+            cp -r ${cache} $intermediates
+            chmod -R +w $intermediates
+            export GOCACHE=$intermediates
+          '';
+          nativeBuildInputs = [ pkgs.nukeReferences ];
+          postInstall = ''
+            nuke-refs $intermediates/*/*
+          '';
         };
         default = cache:
          let
