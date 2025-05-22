@@ -5,71 +5,62 @@
     { self, nixpkgs, garnix, ... }:
     garnix.lib.withCaches  {
       packages = builtins.mapAttrs (system: pkgs: rec {
-        thing = derivation {
+        thing = pkgs.buildGoModule {
           name = "thing";
-          inherit system;
-          builder = "/bin/sh";
-          outputs = ["out" "intermediates"];
-          __contentAddressed = true;
-          args = ["-c" ''
-            echo a b
-            echo a > $out
-            echo b > $intermediates
-          ''];
-        };
-        last = derivation {
-          name = "last";
-          inherit system;
-          builder = "/bin/sh";
-          outputs = ["out" ];
-          args = ["-c" ''
-            echo ${thing} > $out
-          ''];
+          src = ./src;
+          vendorHash = "sha256-5xR9WCkpPpY9D0LR2mcdoOX34RqVpxJjgRwc4GEkGiE=";
+          env.GODEBUG="gocachehash=1";
         };
         default = cache:
          let
           download = pkgs.runCommandCC "download" {
-              src = self;
+              src = ./src;
               buildInputs = [ pkgs.go pkgs.netcat ];
               unsafeDiscardReferences.out = true;
               outputs = [ "out" ];
               __structuredAttrs = true;
               outputHashAlgo = "sha256";
               outputHashMode = "recursive";
-              outputHash = "";
+              outputHash = "sha256-vSroalX+Ci3AofII6v6XmgyLrBdSZ2+GMtbYAxLorwI=";
            } ''
               . "$NIX_ATTRS_SH_FILE"
               mkdir -p $out
-              export HOME=$out
+              export HOME=$PWD
 
               export CGO_ENABLED=1
-              cd $src
-              go build -x -o /dev/null
+              export GOFLAGS=-trimpath
+              export GODEBUG="gocachehash=1"
+              cp --archive $src src
+              chmod +w src
+              cd src
+              go build -x -o ex
+
+              mv -t $out $HOME/.*
           '';
          in
           pkgs.runCommandCC "thing"
             {
-              src = ./.;
-              buildInputs = [ pkgs.go pkgs.netcat ];
-              outputs = ["out" "intermediates"];
+              src = ./src;
               __impure = true;
+              buildInputs = [ pkgs.go pkgs.netcat pkgs.findutils];
+              outputs = ["out" "intermediates"];
               passthru.download = download;
             }
             ''
               mkdir -p $out/bin
-              echo ${download}
-
               mkdir $intermediates
-              export HOME=$intermediates
-	      cd $HOME
-              cp -r ${download}/* || true
-              chmod -R u+w .cache || true
-              ls -alh
+              export HOME=$PWD
+              cp --archive ${download}/.cache .
+              cp --archive ${download}/.config .
+              chmod -R +w .cache
 
               export CGO_ENABLED=1
-              cd $src
-              #export GODEBUG=gocachehash=1 
-              go build -o $out/bin/ex 2>&1 | head -n 100
+              export GOFLAGS=-trimpath
+              export GODEBUG="gocachehash=1"
+              cp --archive $src src
+              chmod +w src
+              cd src
+              go build -x -o ex
             '';
       }) nixpkgs.legacyPackages;
     };
