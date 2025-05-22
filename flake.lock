@@ -1,0 +1,62 @@
+{
+  "nodes": {
+    "garnix": {
+      "inputs": {
+        "nixpkgs": "nixpkgs"
+      },
+      "locked": {
+        "lastModified": 1731087957,
+        "narHash": "sha256-aMKxrcQr6CZlBhtrmOC1GS6gcHacxE71HmBrUTnBngg=",
+        "owner": "garnix-io",
+        "repo": "incrementalize",
+        "rev": "3b21460ce172091482946ea20ef3dcaa4fc0047f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "garnix-io",
+        "repo": "incrementalize",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1730386274,
+        "narHash": "sha256-Zbo4r6br2aedx1JL6m+zZmTbUm3Z1T5Zhq1cabtQA6o=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "2cf8505dcc63e0db2b88841d59b3e827aaeb1e87",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "release-24.05",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs_2": {
+      "locked": {
+        "lastModified": 1746328495,
+        "narHash": "sha256-uKCfuDs7ZM3QpCE/jnfubTg459CnKnJG/LwqEVEdEiw=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "979daf34c8cacebcd917d540070b52a3c2b9b16e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nixos",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "garnix": "garnix",
+        "nixpkgs": "nixpkgs_2"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
