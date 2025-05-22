@@ -8,6 +8,7 @@
     {
       packages = builtins.mapAttrs (system: pkgs: rec {
         thing = pkgs.buildGoModule {
+          passthru.cache = cache.packages.${system}.thing;
           name = "thing";
           src = ./src;
           vendorHash = "sha256-5xR9WCkpPpY9D0LR2mcdoOX34RqVpxJjgRwc4GEkGiE=";
