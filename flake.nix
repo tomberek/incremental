@@ -1,11 +1,12 @@
 {
-  inputs.garnix.url = "github:garnix-io/incrementalize";
+  inputs.cache.url = "path:/var/empty";
+  inputs.cache.flake = false;
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
   outputs =
-    { self, nixpkgs, garnix, ... }:
-    garnix.lib.withCaches  {
+    { self, nixpkgs, cache, ... }:
+    {
       packages = builtins.mapAttrs (system: pkgs: rec {
-        thing = cache: pkgs.buildGoModule {
+        thing = pkgs.buildGoModule {
           name = "thing";
           src = ./src;
           vendorHash = "sha256-5xR9WCkpPpY9D0LR2mcdoOX34RqVpxJjgRwc4GEkGiE=";

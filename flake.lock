@@ -1,40 +1,19 @@
 {
   "nodes": {
-    "garnix": {
-      "inputs": {
-        "nixpkgs": "nixpkgs"
-      },
+    "cache": {
+      "flake": false,
       "locked": {
-        "lastModified": 1731087957,
-        "narHash": "sha256-aMKxrcQr6CZlBhtrmOC1GS6gcHacxE71HmBrUTnBngg=",
-        "owner": "garnix-io",
-        "repo": "incrementalize",
-        "rev": "3b21460ce172091482946ea20ef3dcaa4fc0047f",
-        "type": "github"
+        "lastModified": 1738078732,
+        "narHash": "sha256-pQpattmS9VmO3ZIQUFn66az8GSmB4IvYhTTCFn6SUmo=",
+        "path": "/var/empty",
+        "type": "path"
       },
       "original": {
-        "owner": "garnix-io",
-        "repo": "incrementalize",
-        "type": "github"
+        "path": "/var/empty",
+        "type": "path"
       }
     },
     "nixpkgs": {
-      "locked": {
-        "lastModified": 1730386274,
-        "narHash": "sha256-Zbo4r6br2aedx1JL6m+zZmTbUm3Z1T5Zhq1cabtQA6o=",
-        "owner": "NixOS",
-        "repo": "nixpkgs",
-        "rev": "2cf8505dcc63e0db2b88841d59b3e827aaeb1e87",
-        "type": "github"
-      },
-      "original": {
-        "owner": "NixOS",
-        "ref": "release-24.05",
-        "repo": "nixpkgs",
-        "type": "github"
-      }
-    },
-    "nixpkgs_2": {
       "locked": {
         "lastModified": 1746328495,
         "narHash": "sha256-uKCfuDs7ZM3QpCE/jnfubTg459CnKnJG/LwqEVEdEiw=",
@@ -52,8 +31,8 @@
     },
     "root": {
       "inputs": {
-        "garnix": "garnix",
-        "nixpkgs": "nixpkgs_2"
+        "cache": "cache",
+        "nixpkgs": "nixpkgs"
       }
     }
   },
