@@ -22,6 +22,26 @@
             nuke-refs $incremental/*/*
           '';
         };
+
+        zig = pkgs.stdenvNoCC.mkDerivation {
+          name = "zig";
+          src = ./zig;
+          outputs = ["out" "incremental"];
+          nativeBuildInputs = [
+            pkgs.zig.hook
+            pkgs.nukeReferences
+          ];
+          preConfigure = ''
+            mkdir empty
+            cp -r ${cache.packages.${system}.zig.incremental or "empty"} $incremental
+            chmod -R +w $incremental
+            export ZIG_LOCAL_CACHE_DIR=$incremental
+            export ZIG_GLOBAL_CACHE_DIR=$incremental
+          '';
+          postInstall = if cache?packages then "" else ''
+            nuke-refs $incremental/*/*
+          '';
+        };
       }) nixpkgs.legacyPackages;
     };
 }
