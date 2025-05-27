@@ -18,7 +18,7 @@
             export GOCACHE=$incremental
           '';
           nativeBuildInputs = [ pkgs.nukeReferences ];
-          postInstall = ''
+          postInstall = if cache?packages then "" else ''
             nuke-refs $incremental/*/*
           '';
         };
