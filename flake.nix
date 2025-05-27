@@ -1,6 +1,6 @@
 {
-  inputs.cache.url = "github:tomberek/empty";
-  inputs.cache.inputs.cache.url = "github:tomberek/empty";
+  inputs.cache.url = "github:tomberek/empty/tomberek.more_inputs";
+  #inputs.cache.inputs.cache.url = "github:tomberek/empty/tomberek.more_inputs";
   inputs.cache.inputs.nixpkgs.follows = "nixpkgs";
 
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
