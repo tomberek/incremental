@@ -6,14 +6,14 @@
     { self, nixpkgs, cache, ... }:
     {
       packages = builtins.mapAttrs (system: pkgs: rec {
-        thing = pkgs.buildGoModule {
-          name = "thing";
-          src = ./src;
+        golang = pkgs.buildGoModule {
+          name = "golang";
+          src = ./golang;
           vendorHash = "sha256-5xR9WCkpPpY9D0LR2mcdoOX34RqVpxJjgRwc4GEkGiE=";
           outputs = ["out" "incremental"];
           postConfigure = ''
             mkdir empty
-            cp -r ${cache.packages.${system}.thing.incremental or "empty"} $incremental
+            cp -r ${cache.packages.${system}.golang.incremental or "empty"} $incremental
             chmod -R +w $incremental
             export GOCACHE=$incremental
           '';
