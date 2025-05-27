@@ -9,7 +9,7 @@
       packages = builtins.mapAttrs (system: pkgs: rec {
         golang = pkgs.buildGoModule {
           name = "golang";
-          src = ./golang;
+          src = pkgs.lib.cleanSource ./golang;
           vendorHash = "sha256-5xR9WCkpPpY9D0LR2mcdoOX34RqVpxJjgRwc4GEkGiE=";
           outputs = ["out" "incremental"];
           postConfigure = ''
@@ -26,8 +26,8 @@
 
         zig = pkgs.stdenvNoCC.mkDerivation {
           name = "zig";
-          src = ./zig;
           outputs = ["out" "incremental"];
+          src = pkgs.lib.cleanSource ./zig;
           nativeBuildInputs = [
             pkgs.zig.hook
             pkgs.nukeReferences
