@@ -6,6 +6,12 @@
   outputs =
     { self, nixpkgs, cache, ... }:
     {
+      devShells = builtins.mapAttrs (system: pkgs: rec {
+          default = pkgs.mkShell {
+            name = "dev-shell";
+            inputsFrom = builtins.attrValues self.packages.${system};
+        };
+      }) nixpkgs.legacyPackages;
       packages = builtins.mapAttrs (system: pkgs: rec {
         hello-ccache = (pkgs.hello.override {stdenv = pkgs.ccacheStdenv;}).overrideAttrs (old: {
           outputs = (old.outputs or ["out"]) ++ [ "incremental" ];
