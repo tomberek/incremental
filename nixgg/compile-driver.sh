@@ -242,7 +242,7 @@ NIX
 # ── 6a. Placeholder mode: write .nix thunk, drop marker ──────────
 if [[ "$(nixgg::mode_for "$source")" == "placeholder" ]]; then
   thunk_path=$(nixgg::write_thunk "$expr")
-  nixgg::write_placeholder "$output" "NIX:$thunk_path"
+  nixgg::link_placeholder "$output" "$thunk_path"
   nixgg::log "  thunk:      $thunk_path"
   nixgg::emit "$(jq -cn --arg tool "$TOOL" --arg source "$source" \
                        --arg output "$output" --arg thunk "$thunk_path" \
@@ -257,7 +257,7 @@ built=$(nixgg::nix_build_expr "$expr")
 t1=$(date +%s.%N)
 
 nixgg::log "  built:      $built"
-nixgg::copy_store_to_output "$built" "$output" obj
+nixgg::link_store_to_output "$built" "$output"
 
 extras=$(jq -cn --arg tool "$TOOL" --arg source "$source" --arg src_store "$src_store" \
   '{tool: $tool, source: $source, src_store: $src_store}')

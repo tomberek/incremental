@@ -79,16 +79,27 @@ if (( ${#inputs[@]} == 0 )) || [[ -z "$output" ]]; then
   _passthrough argv "$@"
 fi
 
-# ── Resolve every input's sidecar ────────────────────────────────
+# ── Classify every input by inspecting the symlink ───────────────
+# `nixgg::classify_target` reads the target's own symlink shape:
+#   store <path>   → target → /nix/store/…  (realised earlier)
+#   thunk <path>   → target → …/thunks/<id>.nix (unrealised)
+#   regular|absent → nixgg doesn't own this input → passthrough
 inputs_json='[]'
 for inp in "${inputs[@]}"; do
-  if [[ ! -f "$inp.nixgg" ]]; then
-    nixgg::log "link passthrough: no sidecar for $inp"
-    _passthrough missing_sidecar "$inp" "$@"
-  fi
-  read -r ref_kind ref < <(nixgg::resolve_sidecar "$inp")
+  read -r kind ref < <(nixgg::classify_target "$inp")
+  case "$kind" in
+    store|thunk) ;;
+    *)
+      nixgg::log "link passthrough: $inp isn't a nixgg symlink ($kind)"
+      _passthrough missing_sidecar "$inp" "$@"
+      ;;
+  esac
+  # ref_kind in the payload matches lib.sh:inputs_nix_from_json:
+  #   "store" → wrap with `builtins.storePath` in the Nix expr
+  #   "nix"   → `import` the thunk file
+  local_kind="$kind"; [[ "$kind" == thunk ]] && local_kind="nix"
   inputs_json=$(printf '%s' "$inputs_json" | jq -cS \
-    --arg k "$ref_kind" --arg r "$ref" --arg n "$(basename "$inp")" \
+    --arg k "$local_kind" --arg r "$ref" --arg n "$(basename "$inp")" \
     '. + [{ref_kind: $k, ref: $r, name: $n}]')
 done
 
@@ -128,7 +139,7 @@ NIX
 # ── Placeholder mode: write .nix thunk, drop marker ─────────────
 if [[ "$(nixgg::mode_for "$output")" == "placeholder" ]]; then
   thunk_path=$(nixgg::write_thunk "$expr")
-  nixgg::write_placeholder "$output" "NIX:$thunk_path"
+  nixgg::link_placeholder "$output" "$thunk_path"
   nixgg::log "  thunk:  $thunk_path"
   nixgg::emit "$(jq -cn --arg output "$output" --argjson inputs "$inputs_json" \
                        --arg thunk "$thunk_path" \
@@ -149,5 +160,5 @@ built=$(nixgg::nix_build_expr "$expr")
 t1=$(date +%s.%N)
 
 nixgg::log "  built: $built"
-nixgg::copy_store_to_output "$built" "$output" exec
+nixgg::link_store_to_output "$built" "$output"
 nixgg::emit_derivation link output "$output" "$t0" "$t1" "$built" "$inputs_json"

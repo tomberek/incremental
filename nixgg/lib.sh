@@ -6,16 +6,16 @@
 #   nixgg::resolve_store_path PATH          — /nix/store/... -> on-disk path
 #   nixgg::mode_for FILENAME                — "realise" or "placeholder"
 #   nixgg::thunk_id PAYLOAD_JSON            — deterministic 32-char id
-#   nixgg::write_thunk PAYLOAD_JSON         — persist thunk, echo id
-#   nixgg::write_placeholder OUTPUT MARKER  — placeholder file + sidecar
-#   nixgg::resolve_sidecar PATH             — echoes "thunk TID" or "store PATH"
+#   nixgg::write_thunk EXPR                 — persist .nix thunk, echo abs path
+#   nixgg::link_placeholder OUTPUT THUNK    — symlink OUTPUT → THUNK.nix
+#   nixgg::link_store_to_output STORE OUT   — symlink OUT → STORE/<basename>
+#   nixgg::classify_target PATH             — "absent" | "store <p>" | "thunk <p>" | "regular"
 #   nixgg::cache_hit_of SECS                — echoes true/false
 #   nixgg::emit EVENT_JSON                  — append to NIXGG_LOG if set
 #   nixgg::wrapper_env_json                  — JSON object of NIX_CFLAGS_* etc
 #   nixgg::store_deps_from FLAGS_JSON [ENV_JSON]  — JSON array of /nix/store roots
 #   nixgg::real_tool_for NAME               — sibling tool in gcc-wrapper dir
 #   nixgg::nix_env_setup                    — export NIX_REMOTE + NIX_CONFIG
-#   nixgg::copy_store_to_output STORE PATH FINAL_OUT KIND
 #
 # Depends on: jq, sha256sum, coreutils.
 
@@ -84,28 +84,72 @@ nixgg::write_thunk() {
   printf '%s' "$path"
 }
 
-# Write a placeholder file + sidecar. The sidecar contains either a
-# realised /nix/store/... path or `NIX:<abs>.nix` pointing at the thunk.
-nixgg::write_placeholder() {
-  local output="$1" marker="$2"
+# Symlink OUTPUT → thunk-path. Placeholder mode's representation:
+# the target IS the symlink, its resolved destination IS the .nix
+# thunk. No sidecar, no stub file.
+nixgg::link_placeholder() {
+  local output="$1" thunk_path="$2"
   mkdir -p "$(dirname "$output")"
-  if [[ -e "$output" ]]; then
-    chmod u+w "$output" 2>/dev/null || true
-    rm -f "$output"
-  fi
-  printf 'nixgg-placeholder: %s\n' "$marker" > "$output"
-  printf '%s\n' "$marker" > "$output.nixgg"
+  ln -sfn "$thunk_path" "$output"
 }
 
-# Echo "nix <path>" or "store <path>" for the input's sidecar.
-nixgg::resolve_sidecar() {
-  local sidecar="$1.nixgg"
-  local txt
-  txt=$(<"$sidecar")
-  txt="${txt%$'\n'}"
-  case "$txt" in
-    NIX:*) printf 'nix %s\n'   "${txt#NIX:}" ;;
-    *)     printf 'store %s\n' "$txt" ;;
+# Symlink OUT → the on-disk location of STORE_PATH/<basename OUT>.
+# Realise mode's representation. When using an alt store the target
+# includes the alt-store prefix so the symlink actually resolves; when
+# using the system store the prefix is empty and the symlink points at
+# /nix/store/... directly.
+# Downstream tools that follow symlinks (ld, ar, gcc, …) see a real
+# file with real bytes; classify_target's `readlink -f` strips the alt
+# prefix by looking for `/nix/store/…` inside the resolved path.
+nixgg::link_store_to_output() {
+  local store_path="$1" final="$2"
+  local src="$(nixgg::resolve_store_path "$store_path")/$(basename "$final")"
+  if [[ ! -e "$src" ]]; then
+    printf 'nixgg: expected %s to exist after build\n' "$src" >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$final")"
+  ln -sfn "$src" "$final"
+}
+
+# Classify a target file. Prints one of:
+#   absent
+#   store <canonical-store-path>  (symlink → the store, alt-prefix stripped)
+#   thunk <abs-thunk-nix-path>    (symlink → …/thunks/<id>.nix)
+#   regular                       (real file or unrecognised symlink)
+#
+# For alt stores the on-disk path is like /tmp/nixgg-store/nix/store/…;
+# we strip that prefix so downstream nix expressions get the canonical
+# /nix/store/… form.
+nixgg::classify_target() {
+  local t="$1"
+  if [[ ! -e "$t" && ! -L "$t" ]]; then
+    printf 'absent\n'
+    return
+  fi
+  if [[ ! -L "$t" ]]; then
+    printf 'regular\n'
+    return
+  fi
+  local dest
+  dest=$(readlink -f "$t" 2>/dev/null || readlink "$t")
+  # Strip alt-store on-disk prefix so we always report /nix/store/... form.
+  local alt="$(nixgg::alt_store_prefix)"
+  local canonical="$dest"
+  if [[ -n "$alt" && "$dest" == "$alt"/nix/store/* ]]; then
+    canonical="${dest#"$alt"}"
+  fi
+  # Store path is the directory holding the output file; strip the file.
+  # Match /nix/store/<hash-name>[/<anything>] → keep just the dir prefix.
+  case "$canonical" in
+    /nix/store/*)
+      # Keep everything up to the store-path directory (first 3 path parts).
+      local trimmed="${canonical#/nix/store/}"
+      trimmed="${trimmed%%/*}"
+      printf 'store /nix/store/%s\n' "$trimmed"
+      ;;
+    *.nix) printf 'thunk %s\n' "$dest" ;;
+    *)     printf 'regular\n' ;;
   esac
 }
 
@@ -203,32 +247,6 @@ nixgg::nix_env_setup() {
   export NIX_CONFIG="experimental-features = nix-command flakes ca-derivations
 store = $NIXGG_STORE
 "
-}
-
-# Copy a realised store output back to a caller-visible path.
-# args: store_path final_path kind
-#   store_path : /nix/store/... that `nix build` returned
-#   final_path : e.g. `foo.o`, `libbar.a`, `hello`
-#   kind       : "obj" (0644), "exec" (0755) — decides final chmod
-nixgg::copy_store_to_output() {
-  local store_path="$1" final="$2" kind="$3"
-  local src
-  src="$(nixgg::resolve_store_path "$store_path")/$(basename "$final")"
-  if [[ ! -e "$src" ]]; then
-    printf 'nixgg: expected %s to exist after build\n' "$src" >&2
-    return 1
-  fi
-  mkdir -p "$(dirname "$final")"
-  if [[ -e "$final" ]]; then
-    chmod u+w "$final" 2>/dev/null || true
-    rm -f "$final"
-  fi
-  cp "$src" "$final"
-  case "$kind" in
-    exec) chmod 755 "$final" ;;
-    *)    chmod 644 "$final" ;;
-  esac
-  printf '%s\n' "$store_path" > "$final.nixgg"
 }
 
 # Build a Nix `inputs = [ … ];` list literal from a JSON array of

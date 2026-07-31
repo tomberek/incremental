@@ -10,6 +10,6 @@ hello: $(OBJS)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJS) $(OBJS:.o=.o.nixgg) hello
+	rm -f $(OBJS) hello
 
 .PHONY: clean

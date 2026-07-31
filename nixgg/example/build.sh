@@ -6,7 +6,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 nixgg_root="$(cd "$here/.." && pwd)"
 
 cd "$here"
-rm -f ./*.o ./*.o.nixgg hello hello.nixgg
+rm -f ./*.o hello
 rm -rf .nixgg
 
 "$nixgg_root/nixgg" build --target hello -- make -j"${JOBS:-2}"

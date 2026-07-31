@@ -157,10 +157,9 @@ cmd_force() {
   _child_env_prefix
   [[ -n "$thunks_dir" ]] && export NIXGG_THUNKS_DIR="$thunks_dir"
 
-  # Each target's sidecar is either `/nix/store/…` (already realised)
-  # or `NIX:/absolute/path/to/thunk.nix`. For each unrealised target we
-  # `nix build --file <thunk.nix>` — Nix's own evaluator walks the
-  # transitive graph of `import` calls and schedules in parallel.
+  # Each target is a symlink. If it points at a thunk `.nix`, build it
+  # and re-target the symlink to the resulting /nix/store/... path. If
+  # it already points at the store, nothing to do.
   export NIX_REMOTE=""
   export NIX_CONFIG="experimental-features = nix-command flakes ca-derivations
 store = $NIXGG_STORE
@@ -170,37 +169,54 @@ store = $NIXGG_STORE
     local\?root=*) alt_root="${NIXGG_STORE#local?root=}" ;;
   esac
 
-  local rc=0 target sidecar txt store_path src kind
-  for target in "$@"; do
-    sidecar="$target.nixgg"
-    if [[ ! -f "$sidecar" ]]; then
-      echo "no sidecar for $target" >&2
-      rc=1; continue
+  _classify_target() {
+    local t="$1"
+    if [[ ! -e "$t" && ! -L "$t" ]]; then printf 'absent\n'; return; fi
+    if [[ ! -L "$t" ]]; then printf 'regular\n'; return; fi
+    local dest canonical trimmed
+    dest=$(readlink -f "$t" 2>/dev/null || readlink "$t")
+    canonical="$dest"
+    if [[ -n "$alt_root" && "$dest" == "$alt_root"/nix/store/* ]]; then
+      canonical="${dest#"$alt_root"}"
     fi
-    txt=$(<"$sidecar")
-    txt="${txt%$'\n'}"
-    case "$txt" in
-      NIX:*)
-        store_path=$("$NIXGG_NIX" build --no-link --print-out-paths \
-                      --file "${txt#NIX:}" | tail -1) ;;
-      *)
-        store_path="$txt" ;;
+    case "$canonical" in
+      /nix/store/*)
+        trimmed="${canonical#/nix/store/}"
+        trimmed="${trimmed%%/*}"
+        printf 'store /nix/store/%s\n' "$trimmed"
+        ;;
+      *.nix)  printf 'thunk %s\n' "$dest" ;;
+      *)      printf 'regular\n' ;;
     esac
+  }
 
-    src="$alt_root$store_path/$(basename "$target")"
-    if [[ ! -e "$src" ]]; then
-      echo "expected $src after build" >&2
-      rc=1; continue
-    fi
-    mkdir -p "$(dirname "$target")"
-    [[ -e "$target" ]] && { chmod u+w "$target" 2>/dev/null || true; rm -f "$target"; }
-    cp "$src" "$target"
-    case "$target" in
-      *.o|*.a) chmod 644 "$target" ;;
-      *)       chmod 755 "$target" ;;
+  local rc=0 target kind ref store_path src
+  for target in "$@"; do
+    read -r kind ref < <(_classify_target "$target")
+    case "$kind" in
+      thunk)
+        store_path=$("$NIXGG_NIX" build --no-link --print-out-paths \
+                      --file "$ref" | tail -1)
+        src="$alt_root$store_path/$(basename "$target")"
+        if [[ ! -e "$src" ]]; then
+          echo "expected $src after build" >&2
+          rc=1; continue
+        fi
+        ln -sfn "$src" "$target"
+        echo "[nixgg force] $target -> $store_path" >&2
+        ;;
+      store)
+        echo "[nixgg force] $target already realised ($ref)" >&2
+        ;;
+      absent)
+        echo "no target $target" >&2
+        rc=1
+        ;;
+      regular)
+        echo "$target is not a nixgg symlink" >&2
+        rc=1
+        ;;
     esac
-    printf '%s\n' "$store_path" > "$sidecar"
-    echo "[nixgg force] $target <- $store_path" >&2
   done
   return $rc
 }

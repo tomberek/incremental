@@ -7,8 +7,8 @@
 #   - `ar <mod> <archive.a> <obj.o>…` with sidecars for every .o
 #     → emit ar-thunk (placeholder mode) or realise the archive.
 #   - Anything unrecognised or missing sidecars → passthrough to real ar/ranlib.
-#   - `ranlib <archive.a>` where <archive.a>.nixgg exists → no-op
-#     (our archives are already indexed via `ar Dcru`).
+#   - `ranlib <archive.a>` where <archive.a> is a nixgg-managed symlink
+#     → no-op (our archives are already indexed via `ar Dcru`).
 
 set -euo pipefail
 
@@ -29,10 +29,17 @@ _passthrough_ranlib() {
 }
 
 # ── ranlib: cheap check + delegate ──────────────────────────────────
+# Archives we produce via `ar Dcru` already carry an index; if the
+# target is a nixgg-managed symlink, ranlib is a no-op.
 if [[ "$TOOL" == "ranlib" ]]; then
-  if (( $# == 1 )) && [[ "$1" == *.a && -f "$1.nixgg" ]]; then
-    nixgg::log "ranlib no-op: $1 was produced by nixgg"
-    exit 0
+  if (( $# == 1 )) && [[ "$1" == *.a ]]; then
+    read -r kind _ < <(nixgg::classify_target "$1")
+    case "$kind" in
+      store|thunk)
+        nixgg::log "ranlib no-op: $1 was produced by nixgg"
+        exit 0
+        ;;
+    esac
   fi
   _passthrough_ranlib "$@"
 fi
@@ -61,20 +68,25 @@ for o in "${objects[@]}"; do
   [[ "$o" == *.o ]] || _passthrough_ar "-$modifiers" "$archive" "${objects[@]}"
 done
 
-# ── ar: resolve each object's sidecar ───────────────────────────────
-# We produce a JSON array of {ref_kind, ref, name} objects.
+# ── ar: classify each object symlink ────────────────────────────────
+# {ref_kind, ref, name}: ref_kind is "store" or "nix"; matches
+# lib.sh:inputs_nix_from_json.
 inputs_json='[]'
 for o in "${objects[@]}"; do
-  if [[ ! -f "$o.nixgg" ]]; then
-    nixgg::log "ar passthrough: no sidecar for $o"
-    nixgg::emit "$(jq -cn --arg input "$o" \
-                         --argjson argv "$(printf '%s\n' "-$modifiers" "$archive" "${objects[@]}" | jq -R . | jq -s .)" \
-                         '{event: "ar", kind: "passthrough", reason: "missing_sidecar", input: $input, argv: $argv}')"
-    exec "$(nixgg::real_tool_for ar)" "-$modifiers" "$archive" "${objects[@]}"
-  fi
-  read -r ref_kind ref < <(nixgg::resolve_sidecar "$o")
+  read -r kind ref < <(nixgg::classify_target "$o")
+  case "$kind" in
+    store|thunk) ;;
+    *)
+      nixgg::log "ar passthrough: $o isn't a nixgg symlink ($kind)"
+      nixgg::emit "$(jq -cn --arg input "$o" \
+                          --argjson argv "$(printf '%s\n' "-$modifiers" "$archive" "${objects[@]}" | jq -R . | jq -s .)" \
+                          '{event: "ar", kind: "passthrough", reason: "missing_sidecar", input: $input, argv: $argv}')"
+      exec "$(nixgg::real_tool_for ar)" "-$modifiers" "$archive" "${objects[@]}"
+      ;;
+  esac
+  local_kind="$kind"; [[ "$kind" == thunk ]] && local_kind="nix"
   inputs_json=$(printf '%s' "$inputs_json" | jq -cS \
-    --arg k "$ref_kind" --arg r "$ref" --arg n "$(basename "$o")" \
+    --arg k "$local_kind" --arg r "$ref" --arg n "$(basename "$o")" \
     '. + [{ref_kind: $k, ref: $r, name: $n}]')
 done
 
@@ -105,7 +117,7 @@ NIX
 # ── Placeholder mode: write .nix thunk, drop marker ─────────────
 if [[ "$(nixgg::mode_for "$archive")" == "placeholder" ]]; then
   thunk_path=$(nixgg::write_thunk "$expr")
-  nixgg::write_placeholder "$archive" "NIX:$thunk_path"
+  nixgg::link_placeholder "$archive" "$thunk_path"
   nixgg::log "  thunk:  $thunk_path"
   nixgg::emit "$(jq -cn --arg archive "$archive" --argjson inputs "$inputs_json" \
                        --arg thunk "$thunk_path" \
@@ -127,5 +139,5 @@ built=$(nixgg::nix_build_expr "$expr")
 t1=$(date +%s.%N)
 
 nixgg::log "  built: $built"
-nixgg::copy_store_to_output "$built" "$archive" obj
+nixgg::link_store_to_output "$built" "$archive"
 nixgg::emit_derivation ar archive "$archive" "$t0" "$t1" "$built" "$inputs_json"
