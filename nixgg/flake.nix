@@ -9,8 +9,21 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
+  # PR 15793 (NixOS/nix#15793) — adds the limited daemon socket inside
+  # builder-rpc-v0 sandboxes plus the `nix store submit-output`
+  # command. Only used by `nixgg emit`'s `.sandboxed` variant.
+  #
+  # The PR is closed (not merged), so its head commit isn't on a
+  # branch of NixOS/nix. GitHub keeps `refs/pull/<N>/head` for every
+  # PR forever, so we fetch that ref via git+https. This works even
+  # if the fork is later deleted.
+  inputs.nix-15793 = {
+    url = "git+https://github.com/NixOS/nix.git?ref=refs/pull/15793/head";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+
   outputs =
-    { self, nixpkgs }:
+    { self, nixpkgs, nix-15793 }:
     let
       forEachSystem = f: builtins.mapAttrs (system: pkgs: f system pkgs) nixpkgs.legacyPackages;
     in
@@ -24,6 +37,14 @@
             coreutils = pkgs.coreutils;
             nix = pkgs.nixVersions.stable;
           };
+
+          # Nix built from PR 15793 (builder-rpc-v0 / submit-output).
+          # Only used by `nixgg emit`'s .sandboxed variant. `patched-nix`
+          # follows the same flake schema as upstream, so its default
+          # package is the nix CLI.
+          patchedNix =
+            (nix-15793.packages.${system}.nix-cli
+              or nix-15793.packages.${system}.default);
 
           # The nix/ helper directory (builder.nix, linker.nix,
           # archiver.nix, pure-store-path.nix) imported into the store
@@ -42,6 +63,7 @@
               nix = "${toolchain.nix}";
               real_cc = "${toolchain.gcc}/bin/g++";
               nix_helpers = "${nixHelpers}";
+              patched_nix = "${patchedNix}";
             };
           };
 
@@ -59,8 +81,11 @@
               export NIXGG_REAL_CC="${toolchain.gcc}/bin/g++"
               export NIXGG_NIX="${toolchain.nix}/bin/nix"
               export NIXGG_NIX_HELPERS="${nixHelpers}"
+              # PR 15793's nix build. Only needed by `nixgg emit`
+              # .sandboxed; every other subcommand ignores it.
+              export NIXGG_PATCHED_NIX="${patchedNix}"
               # Store paths the driver may need to copy into an alt store:
-              export NIXGG_TOOLCHAIN_PATHS="${toolchain.gcc} ${toolchain.bash} ${toolchain.coreutils} ${toolchain.nix} ${nixHelpers}"
+              export NIXGG_TOOLCHAIN_PATHS="${toolchain.gcc} ${toolchain.bash} ${toolchain.coreutils} ${toolchain.nix} ${nixHelpers} ${patchedNix}"
             '';
           };
 
@@ -79,6 +104,7 @@
           toolchain-json = toolchainJson;
           env-shell = envShell;
           mosh-env = moshEnv;
+          patched-nix = patchedNix;
           default = envShell;
         }
       );

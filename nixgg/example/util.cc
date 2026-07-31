@@ -1,2 +1,2 @@
 #include "util.h"
-const char *greeting() { return "Hello from nixgg:1"; }
+const char *greeting() { return "Hello from nixgg:2"; }
