@@ -3,15 +3,41 @@
 
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
 
-  outputs = inputs: {
+  outputs = inputs: 
+{
+
+	recipes.something = ./bla/default.nix;
+	recipes.something1 = ./bla/default.nix;
+	recipes.something2 = ./bla/default.nix;
+	recipes.something3 = ./bla/default.nix;
+
+        overlays.default = final: prev: builtins.mapAtrrs (name: drv: final.callPackage drv {}) self.recipes; # mkScope?
+
+
+
+
+
+
+
+
     formatter = builtins.mapAttrs (system: pkgs: pkgs.nixfmt-tree) inputs.nixpkgs.legacyPackages;
+
     devShells = builtins.mapAttrs (system: pkgs: rec {
       default = pkgs.mkShell {
         name = "dev-shell";
         inputsFrom = builtins.attrValues inputs.self.packages.${system};
       };
     }) inputs.nixpkgs.legacyPackages;
+
     packages = builtins.mapAttrs (system: pkgs: rec {
+      d = pkgs.callPackage ./blah.nix {};
+      d = pkgs.callPackage ./blah.nix {};
+      d = pkgs.callPackage ./blah.nix {};
+      d = pkgs.callPackage ./blah.nix {};
+      d = pkgs.callPackage ./blah.nix {};
+      d = pkgs.callPackage ./blah.nix {};
+    })
+
       hello-ccache = (pkgs.hello.override { stdenv = pkgs.ccacheStdenv; }).overrideAttrs (old: {
         outputs = (old.outputs or [ "out" ]) ++ [ "incremental" ];
         configureFlags = (old.configureFlags or [ ]) ++ [

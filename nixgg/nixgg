@@ -1,0 +1,315 @@
+#!/usr/bin/env bash
+# nixgg — one-command wrapper around the shims/driver/force machinery.
+#
+# Subcommands:
+#   run    — run a command with nixgg shims (realise mode).
+#   eval   — same, but placeholder mode: shims write thunks.
+#   force  — realise the .nix thunks pointed at by target sidecars.
+#   build  — eval + force in one shot.
+#   stats  — summarise an activity log (via stats.sh).
+#   env    — print `export …` lines for shims-on-PATH.
+#
+# Auto-bootstraps: if any NIXGG_* env var is missing when a subcommand
+# needs it, we build .#env-shell from the flake and source it. Only
+# hard requirement is a `nix` binary on PATH (or via BOOTSTRAP_NIX).
+
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+export NIXGG_ROOT="${NIXGG_ROOT:-$HERE}"
+
+# ── Bootstrap: populate NIXGG_* env from the flake's .#env-shell ────
+# Idempotent — if every required var is already set, this is a no-op.
+# Requires a `nix` on PATH (or $BOOTSTRAP_NIX) for the first call.
+_nixgg_all_set() {
+  [[ -n "${NIXGG_REAL_CC:-}"           ]] \
+    && [[ -n "${NIXGG_NIX:-}"           ]] \
+    && [[ -n "${NIXGG_STORE:-}"         ]] \
+    && [[ -n "${NIXGG_COMPILER_ROOT:-}" ]] \
+    && [[ -n "${NIXGG_BASH_ROOT:-}"     ]] \
+    && [[ -n "${NIXGG_COREUTILS_ROOT:-}" ]] \
+    && [[ -n "${NIXGG_NIX_HELPERS:-}"   ]]
+}
+
+_nixgg_bootstrap() {
+  _nixgg_all_set && return 0
+
+  local bootstrap_nix="${BOOTSTRAP_NIX:-$(command -v nix || true)}"
+  if [[ -z "$bootstrap_nix" ]]; then
+    echo "nixgg: NIXGG_* env vars unset and no \`nix\` on PATH. Install nix or set BOOTSTRAP_NIX." >&2
+    return 1
+  fi
+
+  local env_file
+  if ! env_file=$( (cd "$NIXGG_ROOT" && \
+        "$bootstrap_nix" build .#env-shell --no-link --print-out-paths) \
+        2> >(tee /dev/stderr) | tail -1); then
+    echo "nixgg: failed to build .#env-shell" >&2
+    return 1
+  fi
+
+  # shellcheck disable=SC1090
+  set -a; . "$env_file"; set +a
+  export NIXGG_ROOT
+  : "${NIXGG_STORE:=local?root=${ALT_STORE:-/tmp/nixgg-store}}"
+  export NIXGG_STORE
+
+  case "$NIXGG_STORE" in
+    auto|daemon) ;;
+    *)
+      if [[ -n "${NIXGG_TOOLCHAIN_PATHS:-}" ]]; then
+        # shellcheck disable=SC2086
+        "$bootstrap_nix" copy --from daemon --to "$NIXGG_STORE" \
+          --no-check-sigs $NIXGG_TOOLCHAIN_PATHS >/dev/null
+      fi
+      ;;
+  esac
+}
+
+usage() {
+  cat <<EOF
+usage: nixgg <subcommand> [args…]
+
+  run    [--mode realise|placeholder] [--thunks-dir DIR] -- <cmd…>
+  eval   [--thunks-dir DIR] -- <cmd…>
+  force  [--thunks-dir DIR] <target…>
+  build  --target FILE [--target FILE…] [--thunks-dir DIR] -- <cmd…>
+  stats  [--since EPOCH] <log>
+  env
+EOF
+}
+
+# ── Argument helpers ───────────────────────────────────────────────
+
+# Strip a leading `--` from a positional command list.
+_drop_dashdash() {
+  if [[ "${1:-}" == "--" ]]; then shift; fi
+  printf '%s\n' "$@"
+}
+
+# Setup the per-child env for a shim-using subcommand and exec.
+_child_env_prefix() {
+  export NIXGG_ROOT
+  export PATH="$HERE/shims:$PATH"
+  export CC="${CC:-cc}"
+  export CXX="${CXX:-c++}"
+}
+
+# ── Subcommand implementations ─────────────────────────────────────
+
+cmd_run() {
+  local mode=realise thunks_dir=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --mode)           mode="$2"; shift 2 ;;
+      --thunks-dir)     thunks_dir="$(realpath -m "$2")"; shift 2 ;;
+      --)               shift; break ;;
+      -h|--help)        usage; return 0 ;;
+      *)                break ;;
+    esac
+  done
+  if (( $# == 0 )); then
+    echo "nixgg run: no command given (use '-- <cmd> [args…]')" >&2
+    return 2
+  fi
+  _nixgg_bootstrap
+  _child_env_prefix
+  export NIXGG_MODE="$mode"
+  [[ -n "$thunks_dir" ]] && export NIXGG_THUNKS_DIR="$thunks_dir"
+  exec "$@"
+}
+
+cmd_eval() {
+  local thunks_dir=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --thunks-dir)     thunks_dir="$(realpath -m "$2")"; shift 2 ;;
+      --)               shift; break ;;
+      -h|--help)        usage; return 0 ;;
+      *)                break ;;
+    esac
+  done
+  if (( $# == 0 )); then
+    echo "nixgg eval: no command given (use '-- <cmd> [args…]')" >&2
+    return 2
+  fi
+  _nixgg_bootstrap
+  _child_env_prefix
+  export NIXGG_MODE=placeholder
+  [[ -n "$thunks_dir" ]] && export NIXGG_THUNKS_DIR="$thunks_dir"
+  exec "$@"
+}
+
+cmd_force() {
+  local thunks_dir=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --thunks-dir)     thunks_dir="$(realpath -m "$2")"; shift 2 ;;
+      -h|--help)        usage; return 0 ;;
+      *)                break ;;
+    esac
+  done
+  if (( $# == 0 )); then
+    echo "nixgg force: no targets given" >&2
+    return 2
+  fi
+  _nixgg_bootstrap
+  _child_env_prefix
+  [[ -n "$thunks_dir" ]] && export NIXGG_THUNKS_DIR="$thunks_dir"
+
+  # Each target's sidecar is either `/nix/store/…` (already realised)
+  # or `NIX:/absolute/path/to/thunk.nix`. For each unrealised target we
+  # `nix build --file <thunk.nix>` — Nix's own evaluator walks the
+  # transitive graph of `import` calls and schedules in parallel.
+  export NIX_REMOTE=""
+  export NIX_CONFIG="experimental-features = nix-command flakes ca-derivations
+store = $NIXGG_STORE
+"
+  local alt_root=""
+  case "$NIXGG_STORE" in
+    local\?root=*) alt_root="${NIXGG_STORE#local?root=}" ;;
+  esac
+
+  local rc=0 target sidecar txt store_path src kind
+  for target in "$@"; do
+    sidecar="$target.nixgg"
+    if [[ ! -f "$sidecar" ]]; then
+      echo "no sidecar for $target" >&2
+      rc=1; continue
+    fi
+    txt=$(<"$sidecar")
+    txt="${txt%$'\n'}"
+    case "$txt" in
+      NIX:*)
+        store_path=$("$NIXGG_NIX" build --no-link --print-out-paths \
+                      --file "${txt#NIX:}" | tail -1) ;;
+      *)
+        store_path="$txt" ;;
+    esac
+
+    src="$alt_root$store_path/$(basename "$target")"
+    if [[ ! -e "$src" ]]; then
+      echo "expected $src after build" >&2
+      rc=1; continue
+    fi
+    mkdir -p "$(dirname "$target")"
+    [[ -e "$target" ]] && { chmod u+w "$target" 2>/dev/null || true; rm -f "$target"; }
+    cp "$src" "$target"
+    case "$target" in
+      *.o|*.a) chmod 644 "$target" ;;
+      *)       chmod 755 "$target" ;;
+    esac
+    printf '%s\n' "$store_path" > "$sidecar"
+    echo "[nixgg force] $target <- $store_path" >&2
+  done
+  return $rc
+}
+
+cmd_build() {
+  local thunks_dir="" targets=()
+  while (( $# > 0 )); do
+    case "$1" in
+      --target)         targets+=( "$2" ); shift 2 ;;
+      --thunks-dir)     thunks_dir="$(realpath -m "$2")"; shift 2 ;;
+      --)               shift; break ;;
+      -h|--help)        usage; return 0 ;;
+      *)                break ;;
+    esac
+  done
+  if (( ${#targets[@]} == 0 )); then
+    echo "nixgg build: at least one --target is required" >&2
+    return 2
+  fi
+  if (( $# == 0 )); then
+    echo "nixgg build: no build command (use '-- <cmd> [args…]')" >&2
+    return 2
+  fi
+
+  _nixgg_bootstrap
+  _child_env_prefix
+  # Pin thunks-dir to $PWD/.nixgg/thunks (or the caller's override) so
+  # recursive submakes don't scatter thunks across per-subdir defaults.
+  export NIXGG_THUNKS_DIR="${thunks_dir:-$PWD/.nixgg/thunks}"
+
+  echo "[nixgg build] eval: $*" >&2
+  ( export NIXGG_MODE=placeholder; "$@" )
+  local rc=$?
+  if (( rc != 0 )); then
+    echo "[nixgg build] eval failed (rc=$rc)" >&2
+    return $rc
+  fi
+
+  echo "[nixgg build] force: ${targets[*]}" >&2
+  cmd_force "${targets[@]}"
+}
+
+cmd_stats() {
+  local since=0 log=""
+  while (( $# > 0 )); do
+    case "$1" in
+      --since)   since="$2"; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *)         log="$1"; shift ;;
+    esac
+  done
+  if [[ -z "$log" ]]; then
+    echo "usage: nixgg stats [--since <epoch>] <log-path>" >&2
+    return 2
+  fi
+  [[ -f "$log" ]] || { echo "no such log: $log" >&2; return 1; }
+  jq -s --argjson since "$since" -r '
+    map(select((.ts // 0) >= $since)) as $events
+    | ($events | group_by([.event, .kind])
+               | map({ key: (.[0].event + " " + .[0].kind), n: length })
+               | sort_by(.key)) as $by_kind
+    | ($events | map(select(.kind == "derivation"))) as $drvs
+    | ($drvs | map(select(.cache_hit)) | length)  as $hits
+    | ($drvs | length)                            as $total
+    | ($drvs | map(.elapsed // 0) | add // 0)     as $elapsed
+    | ($drvs
+        | group_by(.source // .archive // .output // "?")
+        | map({ src: (.[0].source // .[0].archive // .[0].output // "?"),
+                n:   (map(.built) | unique | length) })
+        | map(select(.n > 1))
+        | sort_by(-.n)) as $rebuilds
+    | "=== events by kind ===", empty,
+      ($by_kind | .[] | "  \(.key)  \(.n)"),
+      "",
+      (if $total > 0 then
+         "=== derivations: \($total) total, \($hits) cache-hits "
+           + "(\((100.0 * $hits / $total * 10 | floor / 10))%), "
+           + "\($elapsed | . * 10 | floor / 10)s wall in derivation calls ==="
+       else empty end),
+      (if ($rebuilds | length) > 0 then
+         "", "=== rebuilt sources (distinct outputs across log) ===",
+         ($rebuilds | .[] | "  \(.n)× \(.src)")
+       else empty end)
+  ' "$log"
+}
+
+cmd_env() {
+  local shims="$HERE/shims"
+  printf 'export NIXGG_ROOT=%q\n' "$HERE"
+  printf 'export PATH=%q:"$PATH"\n' "$shims"
+  echo 'export CC=cc'
+  echo 'export CXX=c++'
+}
+
+# ── Dispatch ───────────────────────────────────────────────────────
+
+if (( $# == 0 )); then
+  usage
+  exit 2
+fi
+
+sub="$1"; shift
+case "$sub" in
+  run)    cmd_run    "$@" ;;
+  eval)   cmd_eval   "$@" ;;
+  force)  cmd_force  "$@" ;;
+  build)  cmd_build  "$@" ;;
+  stats)  cmd_stats  "$@" ;;
+  env)    cmd_env         ;;
+  -h|--help|help)  usage  ;;
+  *)      echo "nixgg: unknown subcommand '$sub'" >&2; usage; exit 2 ;;
+esac

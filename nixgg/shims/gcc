@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+for a in "$@"; do
+  if [[ "$a" == "-c" ]]; then
+    exec "$NIXGG_ROOT/compile-driver.sh" gcc "$@"
+  fi
+done
+exec "$NIXGG_ROOT/link-driver.sh" gcc "$@"

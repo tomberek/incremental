@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec "$NIXGG_ROOT/ar-driver.sh" ar "$@"
