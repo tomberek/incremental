@@ -48,8 +48,10 @@ NIXGG_MODE=placeholder ./nixgg/mosh.sh          # clone + build
 
 Instead of `nixgg build --target OUTPUT -- make TARGET`, you can wrap
 the build tool itself. Each wrapper discovers which files the requested
-targets produce, hands those to `nixgg build --target …`, and does a
-final "straggler sweep" that forces any leftover thunk-symlinks.
+targets produce and hands those to `nixgg build --target …`. `nixgg
+force` walks the transitive `import` graph of each target's thunk and
+promotes every sibling symlink recorded in the manifest — so passing a
+single top-level target is enough to realise its whole DAG.
 
 ```sh
 nix-make -j$(nproc)               # discover outputs via `make -n`
@@ -73,12 +75,12 @@ required because cmake's compiler-detection probes need real object
 files synchronously. The same carve-out applies to autoconf conftests
 inside placeholder-mode builds.
 
-**Build systems where the output path is invisible to dry-run.** Some
-rules hide their output — CMake's Unix-Makefiles generator invokes `ar`
-inside `cmake -E cmake_link_script`, so `make -n` never emits the
-archive line. To handle this the wrappers do a final sweep: after the
-build, any symlink under `.` still pointing at a `.nix` thunk gets
-force-realised. This is why `nix-cmake` works even for archives.
+**Build systems that hide their outputs from dry-run.** CMake's
+Unix-Makefiles generator invokes `ar` inside `cmake -E cmake_link_script`,
+so `make -n` never emits the archive line. `nix-make` handles this by
+scanning `.nixgg/thunks/` for root thunks (thunks not imported by any
+other thunk) after the main build and forcing them — the manifest tells
+it which symlink to point at.
 
 ## Every output is a symlink
 
@@ -93,6 +95,26 @@ nixgg never writes bytes to your build tree. Every artifact it produces
 The shim classifies inputs by `readlink -f`. No sidecar files, no
 metadata drift. `nix build --file <thunk>.nix` follows the transitive
 `import` graph to realise the whole DAG.
+
+## The `.nixgg/` directory
+
+Each project accumulates two directories under `.nixgg/`:
+
+- **`.nixgg/thunks/<id>.nix`** — one file per content-addressed
+  derivation. `<id>` is a sha256 of the expression body, so identical
+  inputs collapse to the same thunk.
+- **`.nixgg/symlinks/<id>`** — manifest: one absolute path per line, of
+  every caller-visible symlink that points at `<id>.nix` (or at the
+  store output realised from it). `nixgg force` uses this to promote
+  the whole DAG from a single target: walk the transitive `import`
+  graph, realise each thunk with `nix build --file`, and re-point every
+  recorded symlink at the resulting store path. No filesystem sweep.
+
+Whenever a symlink is promoted from thunk → store, nixgg also
+registers a GC root at
+`<store>/nix/var/nix/gcroots/per-user/$USER/nixgg/<sha1>` (keyed on the
+absolute target path), so `nix-store --gc` preserves realised outputs
+for as long as the caller-visible symlink points at them.
 
 ## Layout
 
