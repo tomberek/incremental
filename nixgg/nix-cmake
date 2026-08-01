@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# nix-cmake — nixgg-aware cmake wrapper.
+#
+# Two roles:
+#   `nix-cmake -S … -B … [-G Ninja]` — configure phase. Runs under
+#     `nixgg run --` (realise mode) so cmake's probe programs get real
+#     outputs.
+#   `nix-cmake --build DIR [target…]` — build phase. Sniffs the
+#     generator from `DIR/CMakeCache.txt` and dispatches to
+#     `nix-ninja` or `nix-make`.
+
+set -euo pipefail
+
+_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+"$_here/nixgg" env >/dev/null
+
+# ── --build MODE? sniff the generator and delegate ────────────────
+if [[ "${1:-}" == "--build" ]]; then
+  builddir="${2:?nix-cmake: --build requires a directory}"
+  shift 2
+
+  cache="$builddir/CMakeCache.txt"
+  gen=""
+  if [[ -f "$cache" ]]; then
+    gen=$(sed -n 's/^CMAKE_GENERATOR:INTERNAL=//p' "$cache")
+  fi
+
+  # cmake --build accepts `--target FOO` and `-- <build-tool-args>`
+  # sections. Pull the targets out for the generator-specific tool.
+  targets=() tool_args=()
+  while (( $# > 0 )); do
+    case "$1" in
+      --target)  targets+=( "$2" ); shift 2 ;;
+      -j|--parallel)
+        tool_args+=( "-j$2" ); shift 2 ;;
+      --config|--preset)
+        # Multi-config generators: pass through to the underlying tool
+        # would need translation. We don't support these yet.
+        tool_args+=( "$1" "$2" ); shift 2 ;;
+      --)       shift; tool_args+=( "$@" ); break ;;
+      *)        tool_args+=( "$1" ); shift ;;
+    esac
+  done
+
+  case "$gen" in
+    Ninja)         inner="nix-ninja" ;;
+    "Unix Makefiles"|"") inner="nix-make" ;;
+    *)
+      echo "nix-cmake: generator '$gen' has no nixgg wrapper; falling back to cmake --build under realise mode" >&2
+      fallback=( "$_here/nixgg" run -- cmake --build "$builddir" )
+      (( ${#tool_args[@]} )) && fallback+=( "${tool_args[@]}" )
+      (( ${#targets[@]}   )) && for t in "${targets[@]}"; do fallback+=( --target "$t" ); done
+      exec "${fallback[@]}"
+      ;;
+  esac
+
+  cmd=( "$_here/$inner" -C "$builddir" )
+  (( ${#tool_args[@]} )) && cmd+=( "${tool_args[@]}" )
+  (( ${#targets[@]}   )) && cmd+=( "${targets[@]}" )
+  exec "${cmd[@]}"
+fi
+
+# ── Anything else (configure, --install, etc.) → realise mode ────
+exec "$_here/nixgg" run -- cmake "$@"
