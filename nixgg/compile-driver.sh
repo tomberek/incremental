@@ -92,7 +92,7 @@ while (( i < n )); do
       i=$((i+1)); continue ;;
     -MF|-MT|-MQ)
       i=$((i+2)); continue ;;
-    *.c|*.cc|*.cpp|*.cxx|*.C)
+    *.c|*.cc|*.cpp|*.cxx|*.C|*.S|*.s)
       if [[ -n "$source" ]]; then
         # Multiple sources — give up on modelling.
         nixgg::log "passthrough (multiple sources): $TOOL $*"
