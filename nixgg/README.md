@@ -10,7 +10,9 @@ inputs + the compiler + flags*, so identical input always yields the
 same output path and rebuilds are free.
 
 Zero Python, no `--impure`. Bash + awk + jq + make + nix, one pinned
-toolchain via `flake.nix`.
+toolchain via `flake.nix`. Drop-in `nix-make` / `nix-ninja` /
+`nix-cmake` wrappers front the daily workflow — you keep typing the
+same build commands, they run through nixgg.
 
 ## Try it
 
@@ -23,15 +25,15 @@ Toy example — cold build, cache-hit rebuild, edit-and-rebuild:
 ```sh
 cd nixgg/example
 
-../nixgg run -- make -j2                        # cold: 2 compiles + 1 link
+../nix-make -j2                                 # cold: 2 compiles + 1 link
 ./hello
 
 rm -f ./*.o hello
-../nixgg run -- make -j2                        # warm: all cache hits
+../nix-make -j2                                 # warm: all cache hits
 
 sed -i 's/greeting()/greeting() /' main.cc      # semantic edit
 rm -f ./*.o hello
-../nixgg run -- make -j2                        # only main.o + link redo
+../nix-make -j2                                 # only main.o + link redo
 git checkout main.cc                            # restore
 ```
 
@@ -41,6 +43,42 @@ Real project (mosh — autoconf + protoc + libs):
 NIXGG_MODE=placeholder ./nixgg/mosh.sh          # clone + build
 /tmp/nixgg-mosh/mosh/src/frontend/mosh-client --version
 ```
+
+## Wrappers: `nix-make`, `nix-ninja`, `nix-cmake`
+
+Instead of `nixgg build --target OUTPUT -- make TARGET`, you can wrap
+the build tool itself. Each wrapper discovers which files the requested
+targets produce, hands those to `nixgg build --target …`, and does a
+final "straggler sweep" that forces any leftover thunk-symlinks.
+
+```sh
+nix-make -j$(nproc)               # discover outputs via `make -n`
+nix-make -j$(nproc) all install   # or specific target(s)
+
+nix-ninja app                     # resolves via `ninja -t query`,
+                                  # follows phony aliases to real files
+
+nix-cmake -S . -B build -G Ninja  # configure phase (realise mode)
+nix-cmake --build build --target app
+                                  # sniffs CMAKE_GENERATOR from CMakeCache.txt
+                                  # → dispatches to nix-ninja or nix-make
+```
+
+All three respect `NIXGG_MODE`, `NIXGG_LOG`, `ALT_STORE`, etc. — they're
+thin shells around `nixgg build`.
+
+**Configure phases run under realise mode.** `nix-cmake` (without
+`--build`) wraps cmake in `nixgg run --`, which is realise mode; that's
+required because cmake's compiler-detection probes need real object
+files synchronously. The same carve-out applies to autoconf conftests
+inside placeholder-mode builds.
+
+**Build systems where the output path is invisible to dry-run.** Some
+rules hide their output — CMake's Unix-Makefiles generator invokes `ar`
+inside `cmake -E cmake_link_script`, so `make -n` never emits the
+archive line. To handle this the wrappers do a final sweep: after the
+build, any symlink under `.` still pointing at a `.nix` thunk gets
+force-realised. This is why `nix-cmake` works even for archives.
 
 ## Every output is a symlink
 
@@ -72,6 +110,10 @@ metadata drift. `nix build --file <thunk>.nix` follows the transitive
       `appendContext`. Lets every driver work without `--impure`.
 - `nixgg` — single-command CLI: `run`, `eval`, `force`, `build`, `emit`,
   `stats`, `env`. Auto-bootstraps env vars on first use.
+- `nix-make` / `nix-ninja` / `nix-cmake` — user-facing build-tool
+  wrappers. Discover output paths from the build system's own
+  introspection (`make -n`, `ninja -t query`, `CMakeCache.txt`) and
+  drive `nixgg build` under the hood.
 - `lib.sh` — shared driver helpers (`log`, `thunk_id`, `write_thunk`,
   `link_placeholder`, `link_store_to_output`, `classify_target`,
   `wrapper_env_json`, `inputs_nix_from_json`, `nix_build_expr`,
