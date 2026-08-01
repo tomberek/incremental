@@ -103,25 +103,7 @@ cmd=( "$_here/nixgg" build "${target_args[@]}" -- make )
 
 # Some rules hide their output from `make -n` — cmake's Make generator
 # invokes `ar` inside `cmake_link_script`, so the archive line never
-# appears in the dry-run. Find those "root" thunks (not imported by
-# any other thunk) and force them too.
-thunks_dir="${NIXGG_THUNKS_DIR:-$PWD/.nixgg/thunks}"
-symlinks_dir="${NIXGG_SYMLINKS_DIR:-$(dirname "$thunks_dir")/symlinks}"
-if [[ -d "$thunks_dir" && -d "$symlinks_dir" ]]; then
-  # Build the set of referenced thunk ids (regex over all thunk files).
-  referenced=$(grep -horE '/thunks/[a-f0-9]+\.nix' "$thunks_dir"/*.nix 2>/dev/null \
-                 | sed 's|^/thunks/||; s|\.nix$||' | sort -u)
-  root_targets=()
-  for tid_file in "$symlinks_dir"/*; do
-    [[ -f "$tid_file" ]] || continue
-    tid=$(basename "$tid_file")
-    if ! grep -qxF "$tid" <<<"$referenced"; then
-      # Root thunk — pick one of its symlinks to force.
-      first_sym=$(head -1 "$tid_file")
-      [[ -L "$first_sym" ]] && root_targets+=( "$first_sym" )
-    fi
-  done
-  if (( ${#root_targets[@]} )); then
-    "$_here/nixgg" force "${root_targets[@]}"
-  fi
-fi
+# appears in the dry-run. `nixgg force --roots` locates and forces any
+# root thunks (thunks not imported by any other thunk) that our
+# discover pass missed.
+"$_here/nixgg" force --roots

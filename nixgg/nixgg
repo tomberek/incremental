@@ -75,7 +75,7 @@ usage: nixgg <subcommand> [args…]
 
   run    [--mode realise|placeholder] [--thunks-dir DIR] -- <cmd…>
   eval   [--thunks-dir DIR] -- <cmd…>
-  force  [--thunks-dir DIR] <target…>
+  force  [--thunks-dir DIR] [--roots] [target…]
   build  --target FILE [--target FILE…] [--thunks-dir DIR] -- <cmd…>
   emit   <target…>            (writes to \$NIXGG_EMIT_OUT if set, else stdout)
   stats  [--since EPOCH] <log>
@@ -145,21 +145,51 @@ cmd_eval() {
 }
 
 cmd_force() {
-  local thunks_dir=""
+  local thunks_dir="" roots_mode=0
   while (( $# > 0 )); do
     case "$1" in
       --thunks-dir)     thunks_dir="$(realpath -m "$2")"; shift 2 ;;
+      --roots)          roots_mode=1; shift ;;
       -h|--help)        usage; return 0 ;;
       *)                break ;;
     esac
   done
-  if (( $# == 0 )); then
-    echo "nixgg force: no targets given" >&2
+  if (( $# == 0 )) && (( ! roots_mode )); then
+    echo "nixgg force: no targets given (or pass --roots)" >&2
     return 2
   fi
   _nixgg_bootstrap
   _child_env_prefix
   [[ -n "$thunks_dir" ]] && export NIXGG_THUNKS_DIR="$thunks_dir"
+
+  local _thunks_dir="${NIXGG_THUNKS_DIR:-$PWD/.nixgg/thunks}"
+  local _symlinks_dir="${NIXGG_SYMLINKS_DIR:-$(dirname "$_thunks_dir")/symlinks}"
+
+  # --roots: locate every thunk that no other thunk imports, then pick
+  # one of its recorded symlinks as the target. Handles build systems
+  # that hide outputs from dry-run (cmake's cmake_link_script → ar).
+  if (( roots_mode )); then
+    if [[ ! -d "$_thunks_dir" || ! -d "$_symlinks_dir" ]]; then
+      # Nothing evaluated yet — no-op.
+      (( $# > 0 )) || return 0
+    else
+      local referenced tid_file tid first_sym
+      referenced=$(grep -horE '/thunks/[a-f0-9]+\.nix' "$_thunks_dir"/*.nix 2>/dev/null \
+                     | sed 's|^/thunks/||; s|\.nix$||' | sort -u)
+      for tid_file in "$_symlinks_dir"/*; do
+        [[ -f "$tid_file" ]] || continue
+        tid=$(basename "$tid_file")
+        if ! grep -qxF "$tid" <<<"$referenced"; then
+          first_sym=$(head -1 "$tid_file")
+          [[ -L "$first_sym" ]] && set -- "$@" "$first_sym"
+        fi
+      done
+    fi
+    if (( $# == 0 )); then
+      # Nothing to do.
+      return 0
+    fi
+  fi
 
   # Each target is a symlink. If it points at a thunk `.nix`, build it
   # and re-target the symlink to the resulting /nix/store/... path. If
@@ -194,7 +224,7 @@ store = $NIXGG_STORE
     esac
   }
 
-  local symlinks_dir="${NIXGG_SYMLINKS_DIR:-$(dirname "${NIXGG_THUNKS_DIR:-$PWD/.nixgg/thunks}")/symlinks}"
+  local symlinks_dir="$_symlinks_dir"
 
   # Walk the transitive `import …/thunks/<id>.nix` references in a
   # thunk file. Prints each visited thunk `.nix` absolute path once.
