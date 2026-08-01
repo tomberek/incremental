@@ -98,12 +98,22 @@
             dontUnpack = true;
             installPhase = "mkdir -p $out";
           };
+
+          fmtEnv = pkgs.stdenv.mkDerivation {
+            name = "nixgg-fmt-env";
+            nativeBuildInputs = with pkgs; [
+              cmake ninja gnumake pkg-config which
+            ];
+            dontUnpack = true;
+            installPhase = "mkdir -p $out";
+          };
         in
         toolchain
         // {
           toolchain-json = toolchainJson;
           env-shell = envShell;
           mosh-env = moshEnv;
+          fmt-env = fmtEnv;
           patched-nix = patchedNix;
           default = envShell;
         }

@@ -32,6 +32,9 @@ _NIXGG_MODE="${NIXGG_MODE:-realise}"
 _NIXGG_THUNKS_DIR="${NIXGG_THUNKS_DIR:-$PWD/.nixgg/thunks}"
 _NIXGG_LOG="${NIXGG_LOG:-}"
 
+# @rspfile expansion lives in shims/_dispatch.sh (needs to run before
+# shim dispatch chooses compile vs link based on the presence of -c).
+
 nixgg::log() {
   printf '[nixgg] %s\n' "$*" >&2
 }
@@ -48,18 +51,33 @@ nixgg::resolve_store_path() {
 }
 
 nixgg::mode_for() {
-  # Autoconf `conftest*` probes must realise even in placeholder mode
-  # so configure can see actual outputs.
+  # Configure-phase probes must realise even in placeholder mode so
+  # the configure system sees actual outputs. Both autoconf and CMake
+  # invoke `cc` on tiny throwaway sources with predictable names.
   if [[ "$_NIXGG_MODE" != "placeholder" ]]; then
     printf 'realise'
     return
   fi
-  local base
-  base="$(basename "$1")"
+  local path="$1" base
+  base="$(basename "$path")"
+  # Autoconf: `conftest.c`, `conftest.cpp`, `conftest.o`, `conftest*`.
   case "$base" in
-    conftest*) printf 'realise' ;;
-    *)         printf 'placeholder' ;;
+    conftest*) printf 'realise'; return ;;
   esac
+  # CMake: `testCCompiler.c`, `CMakeCXXCompilerId.cpp`, `CheckXxx*.c`.
+  case "$base" in
+    test?CompilerABI*|test?Compiler*|CMake?CompilerId*|CMakeCCompilerABI*|CMakeCXXCompilerABI*)
+      printf 'realise'; return ;;
+    CheckFunctionExists*|CheckIncludeFile*|CheckIncludeFiles*|CheckSymbolExists*|CheckTypeSize*|CheckCSourceCompiles*|CheckCXXSourceCompiles*|CheckCSourceRuns*|CheckCXXSourceRuns*)
+      printf 'realise'; return ;;
+  esac
+  # Anything under CMake's TryCompile scratch directories — the
+  # filenames vary but the path always contains CMakeFiles/CMakeScratch.
+  case "$path" in
+    */CMakeFiles/CMakeScratch/*|*/CMakeFiles/CMakeTmp/*)
+      printf 'realise'; return ;;
+  esac
+  printf 'placeholder'
 }
 
 nixgg::thunk_id() {

@@ -17,6 +17,7 @@ _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 . "$_here/lib.sh"
 
 TOOL="${1:?tool name required}"; shift
+# @rspfile args are pre-expanded by shims/_dispatch.sh.
 
 _passthrough_ar() {
   nixgg::emit "$(jq -cn --argjson argv "$(printf '%s\n' "$@" | jq -R . | jq -s .)" \

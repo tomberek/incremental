@@ -1,0 +1,5 @@
+# Build artifacts produced by `../nixgg build` / `../nixgg run`.
+*.o
+hello
+.nixgg/
+inside-sandbox.nix

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$NIXGG_ROOT/shims/_dispatch.sh"
 for a in "$@"; do
   if [[ "$a" == "-c" ]]; then
     exec "$NIXGG_ROOT/compile-driver.sh" gcc "$@"

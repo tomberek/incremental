@@ -22,6 +22,7 @@ _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 . "$_here/lib.sh"
 
 TOOL="${1:?tool name required}"; shift
+# @rspfile args are pre-expanded by shims/_dispatch.sh.
 
 _argv_json() {
   if (( $# == 0 )); then printf '[]'; else printf '%s\n' "$@" | jq -R . | jq -s .; fi
@@ -83,6 +84,14 @@ while (( i < n )); do
       passthrough+=( "$a" "$val" )
       i=$((i+2)); continue
       ;;
+    # Dep-file generation flags — drop them. They target paths outside
+    # our sandbox, and scan-headers.sh already produced the header list
+    # we need. Includes both 1-arg (-M -MM -MG -MP -MD -MMD) and 2-arg
+    # (-MF -MT -MQ <arg>) forms.
+    -M|-MM|-MG|-MP|-MD|-MMD)
+      i=$((i+1)); continue ;;
+    -MF|-MT|-MQ)
+      i=$((i+2)); continue ;;
     *.c|*.cc|*.cpp|*.cxx|*.C)
       if [[ -n "$source" ]]; then
         # Multiple sources — give up on modelling.

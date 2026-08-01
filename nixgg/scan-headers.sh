@@ -74,7 +74,20 @@ done
 #
 #    awk joins backslash-continuations, drops the "target:" prefix,
 #    prints each dep on its own line.
-deps=$("$real_cc" -MM -MG -MF - "$source_rel" "${flags[@]}" 2>/dev/null \
+# Strip any of the caller's -M* dep-generation flags so ours (`-MF -`)
+# aren't overridden. CMake in particular passes `-MD -MT <o> -MF <d>`.
+scan_flags=()
+skip_next=0
+for f in "${flags[@]}"; do
+  if (( skip_next )); then skip_next=0; continue; fi
+  case "$f" in
+    -MF|-MT|-MQ)   skip_next=1; continue ;;    # 2-arg forms
+    -M|-MM|-MG|-MP|-MD|-MMD) continue ;;         # 1-arg forms
+  esac
+  scan_flags+=( "$f" )
+done
+
+deps=$("$real_cc" -MM -MG -MF - "$source_rel" "${scan_flags[@]}" 2>/dev/null \
        | awk '
            # Handle line continuations first.
            /\\$/ { sub(/\\$/, ""); buf = buf $0; next }

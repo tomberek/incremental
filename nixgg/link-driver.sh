@@ -15,6 +15,7 @@ _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 # argv0 conventionally identifies the tool; the shim passes it as $1.
 TOOL="${1:?tool name required}"; shift
+# @rspfile args are pre-expanded by shims/_dispatch.sh.
 
 _argv_json() {
   printf '%s\n' "$@" | jq -R . | jq -s .
@@ -71,6 +72,9 @@ while (( i < n )); do
     -o)      output="${argv[i+1]}"; i=$((i+2)); continue ;;
     -o?*)    output="${a:2}"; i=$((i+1)); continue ;;
     *.o|*.a) inputs+=( "$a" ); i=$((i+1)); continue ;;
+    # Drop dep-file flags — they target host paths, not our sandbox.
+    -M|-MM|-MG|-MP|-MD|-MMD) i=$((i+1)); continue ;;
+    -MF|-MT|-MQ)             i=$((i+2)); continue ;;
     *)       flags+=( "$a" );  i=$((i+1)); continue ;;
   esac
 done
