@@ -194,11 +194,81 @@ store = $NIXGG_STORE
     esac
   }
 
+  local symlinks_dir="${NIXGG_SYMLINKS_DIR:-$(dirname "${NIXGG_THUNKS_DIR:-$PWD/.nixgg/thunks}")/symlinks}"
+
+  # Walk the transitive `import …/thunks/<id>.nix` references in a
+  # thunk file. Prints each visited thunk `.nix` absolute path once.
+  # Bash lacks a set, so we use an associative array.
+  declare -A _seen=()
+  _collect_thunks() {
+    local t="$1"
+    [[ -n "${_seen[$t]:-}" ]] && return
+    _seen["$t"]=1
+    printf '%s\n' "$t"
+    # Grep for `import /abs/path/thunks/<id>.nix` references. Every
+    # thunk file uses absolute imports so we can extract them cleanly.
+    local child
+    while IFS= read -r child; do
+      [[ -f "$child" ]] || continue
+      _collect_thunks "$child"
+    done < <(grep -oE '/[^ ]+/thunks/[a-f0-9]+\.nix' "$t" 2>/dev/null | sort -u)
+  }
+
+  # Register a GC root for a store path (used from force promotion).
+  # Alt-store: nested gcroots under the alt-store root. System store:
+  # per-user gcroots under /nix/var/nix/gcroots.
+  _register_gcroot() {
+    local store_path="$1" target="$2"
+    local root_dir
+    if [[ -n "$alt_root" ]]; then
+      root_dir="$alt_root/nix/var/nix/gcroots/per-user/${USER:?}/nixgg"
+    else
+      root_dir="/nix/var/nix/gcroots/per-user/${USER:?}/nixgg"
+    fi
+    mkdir -p "$root_dir" 2>/dev/null || return 0
+    [[ -w "$root_dir" ]] || return 0
+    local key
+    key=$(printf '%s' "$(realpath -m --no-symlinks "$target")" | sha1sum | cut -c1-32)
+    ln -sfn "$store_path" "$root_dir/$key"
+  }
+
+  # Promote every caller-visible symlink recorded against a thunk.
+  # Called after we've realised the thunk (so its outPath is available
+  # via a fresh eval — cheap since Nix's eval cache is hot).
+  _promote_thunk_symlinks() {
+    local thunk="$1"
+    local tid_base tid manifest store_path sym
+    tid_base="$(basename "$thunk")"
+    tid="${tid_base%.nix}"
+    manifest="$symlinks_dir/$tid"
+    [[ -f "$manifest" ]] || return 0
+    # `nix build --print-out-paths` on a CA thunk gives us the
+    # realised store path. Already-built thunks return instantly.
+    # (Plain `nix eval` returns a placeholder for CA outputs.)
+    store_path=$("$NIXGG_NIX" build --no-link --print-out-paths \
+                   --file "$thunk" 2>/dev/null | tail -1 || true)
+    [[ "$store_path" == /nix/store/* ]] || return 0
+    local src
+    while IFS= read -r sym; do
+      [[ -z "$sym" ]] && continue
+      [[ -L "$sym" ]] || continue  # user deleted it — leave alone
+      # Skip if already store-linked (idempotent).
+      dest_now=$(readlink "$sym")
+      [[ "$dest_now" == *.nix ]] || continue
+      src="$alt_root$store_path/$(basename "$sym")"
+      [[ -e "$src" ]] || continue
+      ln -sfn "$src" "$sym"
+      _register_gcroot "$store_path" "$sym"
+      echo "[nixgg force] $sym -> $store_path" >&2
+    done < "$manifest"
+  }
+
   local rc=0 target kind ref store_path src
   for target in "$@"; do
     read -r kind ref < <(_classify_target "$target")
     case "$kind" in
       thunk)
+        # Realise the target's whole graph in one nix build.
         store_path=$("$NIXGG_NIX" build --no-link --print-out-paths \
                       --file "$ref" | tail -1)
         src="$alt_root$store_path/$(basename "$target")"
@@ -207,7 +277,16 @@ store = $NIXGG_STORE
           rc=1; continue
         fi
         ln -sfn "$src" "$target"
+        _register_gcroot "$store_path" "$target"
         echo "[nixgg force] $target -> $store_path" >&2
+
+        # Promote every symlink of every transitive thunk we just
+        # realised. All the store paths are already in the alt store
+        # (nix build populated them); we only need to update symlinks.
+        _seen=()
+        while IFS= read -r t; do
+          _promote_thunk_symlinks "$t"
+        done < <(_collect_thunks "$ref")
         ;;
       store)
         echo "[nixgg force] $target already realised ($ref)" >&2

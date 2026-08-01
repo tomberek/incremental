@@ -30,6 +30,11 @@
 
 _NIXGG_MODE="${NIXGG_MODE:-realise}"
 _NIXGG_THUNKS_DIR="${NIXGG_THUNKS_DIR:-$PWD/.nixgg/thunks}"
+# Manifest of caller-visible symlink → thunk-id. One file per thunk;
+# each file lists absolute paths of symlinks pointing at that thunk.
+# `cmd_force` uses this to promote every symlink of every realised
+# thunk, so we don't need a post-hoc filesystem sweep.
+_NIXGG_SYMLINKS_DIR="${NIXGG_SYMLINKS_DIR:-$(dirname "$_NIXGG_THUNKS_DIR")/symlinks}"
 _NIXGG_LOG="${NIXGG_LOG:-}"
 
 # @rspfile expansion lives in shims/_dispatch.sh (needs to run before
@@ -102,25 +107,82 @@ nixgg::write_thunk() {
   printf '%s' "$path"
 }
 
+# Record that a caller-visible symlink at $output points at thunk id
+# $tid, so `nixgg force` can find every symlink of every realised
+# thunk without scanning the filesystem.
+#
+# Manifest layout: $NIXGG_SYMLINKS_DIR/<tid>, one absolute path per
+# line. Append-only per-thunk file → concurrent shims writing under
+# `make -j` don't contend as long as they hit different thunks. Bash
+# `>>` is atomic below PIPE_BUF; our paths are short.
+nixgg::_record_symlink() {
+  local output="$1" tid="$2"
+  local abs manifest
+  # `realpath -m --no-symlinks` normalises path components without
+  # following symlinks — critical here because `output` typically IS
+  # a symlink (either the one we just wrote, or a leftover from a
+  # prior invocation).
+  abs=$(realpath -m --no-symlinks "$output")
+  manifest="$_NIXGG_SYMLINKS_DIR/$tid"
+  mkdir -p "$_NIXGG_SYMLINKS_DIR"
+  # Guard against duplicate entries. Cheap for small manifests.
+  if [[ -f "$manifest" ]] && grep -qxF "$abs" "$manifest" 2>/dev/null; then
+    return 0
+  fi
+  printf '%s\n' "$abs" >> "$manifest"
+}
+
+# Register a GC root for a realised store path, so `nix-store --gc`
+# preserves it as long as our manifest points at it.
+#
+# Alt store (`local?root=/some/path`): gcroots live at
+#   /some/path/nix/var/nix/gcroots/nixgg/
+# System store: /nix/var/nix/gcroots/per-user/$USER/nixgg/ (this dir
+# has to be created by the daemon/user first; if it's not, we skip).
+nixgg::_register_gcroot() {
+  local store_path="$1" target="$2"
+  local root_dir alt
+  alt="$(nixgg::alt_store_prefix)"
+  # Nix's gc walks specific subdirs of gcroots/: `auto/` (indirect
+  # roots, symlinks-to-symlinks), `per-user/` (writable without root),
+  # and a few others. Anywhere else is invisible. Use per-user under
+  # the alt store's gcroots too, since it's the most portable subpath.
+  if [[ -n "$alt" ]]; then
+    root_dir="$alt/nix/var/nix/gcroots/per-user/${USER:?}/nixgg"
+  else
+    root_dir="/nix/var/nix/gcroots/per-user/${USER:?}/nixgg"
+  fi
+  mkdir -p "$root_dir" 2>/dev/null || return 0
+  [[ -w "$root_dir" ]] || return 0
+  local key
+  key=$(printf '%s' "$(realpath -m --no-symlinks "$target")" | sha1sum | cut -c1-32)
+  ln -sfn "$store_path" "$root_dir/$key"
+}
+
 # Symlink OUTPUT → thunk-path. Placeholder mode's representation:
 # the target IS the symlink, its resolved destination IS the .nix
-# thunk. No sidecar, no stub file.
+# thunk. No sidecar, no stub file. Also records the symlink in the
+# manifest so `nixgg force` knows where to promote it.
 nixgg::link_placeholder() {
   local output="$1" thunk_path="$2"
   mkdir -p "$(dirname "$output")"
   ln -sfn "$thunk_path" "$output"
+  local tid_base tid
+  tid_base="$(basename "$thunk_path")"
+  tid="${tid_base%.nix}"
+  nixgg::_record_symlink "$output" "$tid"
 }
 
 # Symlink OUT → the on-disk location of STORE_PATH/<basename OUT>.
-# Realise mode's representation. When using an alt store the target
-# includes the alt-store prefix so the symlink actually resolves; when
-# using the system store the prefix is empty and the symlink points at
-# /nix/store/... directly.
-# Downstream tools that follow symlinks (ld, ar, gcc, …) see a real
-# file with real bytes; classify_target's `readlink -f` strips the alt
-# prefix by looking for `/nix/store/…` inside the resolved path.
+# Realise mode's representation. Downstream tools that follow symlinks
+# see a real file with real bytes; classify_target strips any alt-store
+# prefix to report the canonical /nix/store/… path.
+#
+# In realise mode we also record the promotion in the manifest and
+# register a GC root, so the store output is protected against
+# `nix-store --gc` for as long as the caller-visible symlink exists.
 nixgg::link_store_to_output() {
-  local store_path="$1" final="$2"
+  local store_path="$1" final="$2" tid="${3:-}"
   local src="$(nixgg::resolve_store_path "$store_path")/$(basename "$final")"
   if [[ ! -e "$src" ]]; then
     printf 'nixgg: expected %s to exist after build\n' "$src" >&2
@@ -128,6 +190,9 @@ nixgg::link_store_to_output() {
   fi
   mkdir -p "$(dirname "$final")"
   ln -sfn "$src" "$final"
+  # Record the symlink under the thunk (if the caller supplied one).
+  [[ -n "$tid" ]] && nixgg::_record_symlink "$final" "$tid"
+  nixgg::_register_gcroot "$store_path" "$final"
 }
 
 # Classify a target file. Prints one of:

@@ -124,18 +124,4 @@ done
 cmd=( "$_here/nixgg" build "${target_args[@]}" -- ninja )
 (( ${#flags[@]}   )) && cmd+=( "${flags[@]}" )
 (( ${#targets[@]} )) && cmd+=( "${targets[@]}" )
-"${cmd[@]}"
-
-# Belt-and-braces: sweep for symlinks still pointing at thunks and
-# force them. Ninja's target model is stricter than make's so this
-# should be rare, but symmetric with nix-make.
-stragglers=()
-while IFS= read -r -d '' f; do
-  [[ -L "$f" ]] || continue
-  dest=$(readlink "$f")
-  [[ "$dest" == *.nix ]] && stragglers+=( "$f" )
-done < <(find . -type l -print0 2>/dev/null)
-
-if (( ${#stragglers[@]} )); then
-  "$_here/nixgg" force "${stragglers[@]}"
-fi
+exec "${cmd[@]}"
