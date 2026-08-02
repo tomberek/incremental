@@ -25,7 +25,7 @@ func Main(args []string) error {
 	case "build":
 		return cmdBuild(rest)
 	case "env":
-		return cmdEnv()
+		return cmdEnv(rest)
 	case "-h", "--help", "help":
 		usage()
 		return nil
@@ -41,6 +41,6 @@ func usage() {
   eval    [--thunks-dir DIR] -- <cmd…>
   force   [--thunks-dir DIR] [--roots] [target…]
   build   --target FILE [--target FILE…] [--thunks-dir DIR] -- <cmd…>
-  env
+  env     [--store URL] [--print-only]
 `)
 }
