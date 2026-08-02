@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -157,6 +158,18 @@ func execCmd(cmd []string) error {
 func findExec(name string) (string, error) {
 	if filepath.IsAbs(name) {
 		return name, nil
+	}
+	// Explicit relative path (./configure, ../foo) → resolve against
+	// cwd, not PATH. Matches shell behavior.
+	if strings.ContainsRune(name, '/') {
+		abs, err := filepath.Abs(name)
+		if err != nil {
+			return "", err
+		}
+		if info, err := os.Stat(abs); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return abs, nil
+		}
+		return "", fmt.Errorf("%s: not executable", name)
 	}
 	for _, d := range filepath.SplitList(os.Getenv("PATH")) {
 		if d == "" {

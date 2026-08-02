@@ -95,11 +95,20 @@ what it already knows and errors out if anything's missing.
 	w := bufio.NewWriter(os.Stdout)
 	defer w.Flush()
 	fmt.Fprintf(w, "export NIXGG_ROOT=%s\n", shellQuote(root))
-	// PATH gets both shims/ (so make → cc → us) AND bin/ (so the user
-	// can call `nixgg build …` by name). Order: bin first so `nixgg` is
-	// unambiguous even if a shim symlink named `nixgg` ever existed.
+	// PATH order matters — first entries win:
+	//  1. bin/    — for the `nixgg` CLI itself
+	//  2. shims/  — for `cc`, `gcc`, `c++`, `g++`, `ar`, `ranlib`
+	//  3. toolchain bins from env-shell — real `ar`, `nm`, `strings`
+	//     etc that aren't shimmed. Also gnumake+coreutils, so a plain
+	//     `nixgg env` from an empty shell is enough to run `make`.
+	//  4. the caller's existing $PATH
 	bin := filepath.Join(root, "bin")
-	fmt.Fprintf(w, "export PATH=%s:%s:${PATH}\n", shellQuote(bin), shellQuote(shims))
+	toolchainBins := toolchainBinDirs(env)
+	pathParts := []string{shellQuote(bin), shellQuote(shims)}
+	for _, d := range toolchainBins {
+		pathParts = append(pathParts, shellQuote(d))
+	}
+	fmt.Fprintf(w, "export PATH=%s:${PATH}\n", strings.Join(pathParts, ":"))
 	fmt.Fprintln(w, "export CC=cc")
 	fmt.Fprintln(w, "export CXX=c++")
 	fmt.Fprintf(w, "export NIXGG_STORE=%s\n", shellQuote(store))
@@ -124,7 +133,7 @@ func loadToolchainEnv(root string, printOnly bool) (map[string]string, error) {
 		"NIXGG_COMPILER_ROOT", "NIXGG_BASH_ROOT", "NIXGG_COREUTILS_ROOT",
 	}
 	optional := []string{
-		"NIXGG_PATCHED_NIX", "NIXGG_TOOLCHAIN_PATHS",
+		"NIXGG_PATCHED_NIX", "NIXGG_TOOLCHAIN_PATHS", "NIXGG_GNUMAKE_ROOT",
 	}
 	env := make(map[string]string)
 	var missing []string
@@ -280,6 +289,39 @@ func shellQuote(s string) string {
 		return s
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// toolchainBinDirs returns the `<store>/bin` directories from the
+// toolchain roots we already know about. Order deliberately puts
+// coreutils LAST so the toolchain (gcc-wrapper's ld/ar/nm) wins if
+// there's a name collision.
+func toolchainBinDirs(env map[string]string) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(root string) {
+		if root == "" {
+			return
+		}
+		bin := filepath.Join(root, "bin")
+		if seen[bin] {
+			return
+		}
+		seen[bin] = true
+		out = append(out, bin)
+	}
+	// gcc-wrapper carries the sibling tools (ar, nm, strings, etc)
+	// keyed to this compiler, plus of course cc/c++.
+	add(env["NIXGG_COMPILER_ROOT"])
+	// gnumake — so `make` is on PATH from a plain `eval $(nixgg env)`.
+	add(env["NIXGG_GNUMAKE_ROOT"])
+	// coreutils gives us `ls`, `mkdir`, `rm`, and friends — the shim
+	// invokes some (via os.exec.Command) and downstream Makefiles
+	// expect them on PATH too.
+	add(env["NIXGG_COREUTILS_ROOT"])
+	// bash last — mostly here for scripts that hardcode /bin/sh
+	// lookups. We don't actively need it on PATH.
+	add(env["NIXGG_BASH_ROOT"])
+	return out
 }
 
 // sortStrings is a tiny wrapper we keep local to avoid importing "sort"

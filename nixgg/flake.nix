@@ -35,6 +35,7 @@
             gcc = pkgs.gcc;
             bash = pkgs.bash;
             coreutils = pkgs.coreutils;
+            gnumake = pkgs.gnumake;
             nix = pkgs.nixVersions.stable;
           };
 
@@ -93,6 +94,7 @@
               export NIXGG_COMPILER_ROOT="${toolchain.gcc}"
               export NIXGG_BASH_ROOT="${toolchain.bash}"
               export NIXGG_COREUTILS_ROOT="${toolchain.coreutils}"
+              export NIXGG_GNUMAKE_ROOT="${toolchain.gnumake}"
               export NIXGG_REAL_CC="${toolchain.gcc}/bin/g++"
               export NIXGG_NIX="${toolchain.nix}/bin/nix"
               export NIXGG_NIX_HELPERS="${nixHelpers}"
@@ -100,7 +102,7 @@
               # .sandboxed; every other subcommand ignores it.
               export NIXGG_PATCHED_NIX="${patchedNix}"
               # Store paths the driver may need to copy into an alt store:
-              export NIXGG_TOOLCHAIN_PATHS="${toolchain.gcc} ${toolchain.bash} ${toolchain.coreutils} ${toolchain.nix} ${nixHelpers} ${patchedNix}"
+              export NIXGG_TOOLCHAIN_PATHS="${toolchain.gcc} ${toolchain.bash} ${toolchain.coreutils} ${toolchain.gnumake} ${toolchain.nix} ${nixHelpers} ${patchedNix}"
             '';
           };
 

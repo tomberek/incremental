@@ -1,66 +1,57 @@
 #!/usr/bin/env bash
-# Point nixgg at fmt's CMake build. Two-phase like mosh.sh:
-#   1. `cmake -B build` in realise mode so its compiler probes get real
-#      results (widen `_mode_for` covered the auto-detected filenames).
-#   2. `cmake --build build` in placeholder mode → `nixgg force` on the
-#      chosen target.
+# Build fmt through nixgg. Fmt uses CMake — we need cmake+ninja on
+# PATH — so we layer the flake's fmt-env dev shell on top of nixgg.
+#
+# Cmake's compiler probes need runnable binaries synchronously (same
+# as autoconf conftests). The compile shim's mode logic recognises
+# their filenames (test?Compiler*, CheckXxx*, CMakeFiles/CMakeScratch/*)
+# and realises those specific TUs while everything else stays
+# placeholder-mode.
 #
 # Env knobs:
-#   FMT_SRC           existing checkout to build (default: /tmp/nixgg-fmt/fmt)
-#   NIXGG_JOBS        -j level (default: nproc)
-#   NIXGG_STAGE_ONLY  =1 → drop into nix develop .#fmt-env instead
+#   FMT_SRC     existing checkout (default: /tmp/fmt-nixgg)
+#   NIXGG_JOBS  -j level (default: nproc)
 
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-FMT_SRC="${FMT_SRC:-/tmp/nixgg-fmt/fmt}"
+FMT_SRC="${FMT_SRC:-/tmp/fmt-nixgg}"
 NIXGG_JOBS="${NIXGG_JOBS:-$(nproc)}"
 
-info() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
-fail() { printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
-
-BOOTSTRAP_NIX="${BOOTSTRAP_NIX:-$(command -v nix)}"
-[[ -x "$BOOTSTRAP_NIX" ]] || fail "no nix on PATH"
-
 if [[ ! -d "$FMT_SRC" ]]; then
-  info "Cloning fmt into $FMT_SRC"
-  mkdir -p "$(dirname "$FMT_SRC")"
+  printf '==> Cloning fmt into %s\n' "$FMT_SRC" >&2
   git clone --depth=1 --branch 11.0.2 https://github.com/fmtlib/fmt.git "$FMT_SRC"
 fi
 
-if [[ "${NIXGG_STAGE_ONLY:-0}" == "1" ]]; then
-  info "NIXGG_STAGE_ONLY=1 — dropping into nix develop .#fmt-env"
-  exec "$BOOTSTRAP_NIX" develop "$here#fmt-env"
-fi
+BOOTSTRAP_NIX="${BOOTSTRAP_NIX:-$(command -v nix)}"
+NIXGG_ENV_SHELL=$("$BOOTSTRAP_NIX" build "$here#env-shell" --no-link --print-out-paths)
+export NIXGG_STORE="${NIXGG_STORE:-local?root=/tmp/nixgg-store}"
 
-export FMT_SRC NIXGG_JOBS
-INNER_SCRIPT='
-set -euo pipefail
-cd "$FMT_SRC"
+exec "$BOOTSTRAP_NIX" develop "$here#fmt-env" --command bash -c '
+  set -euo pipefail
+  set -a
+  . "'"$NIXGG_ENV_SHELL"'"
+  set +a
+  export PATH="'"$here"'/bin:'"$here"'/shims:$PATH"
+  export NIXGG_ROOT="'"$here"'"
+  export NIXGG_THUNKS_DIR="'"$FMT_SRC"'/.nixgg/thunks"
+  export CC=cc CXX=c++
 
-# Fresh build dir each time keeps the demo simple.
-rm -rf build
-mkdir build
+  cd "'"$FMT_SRC"'"
+  # Fresh build dir keeps the demo predictable.
+  rm -rf build && mkdir build
 
-GEN="${NIXGG_CMAKE_GEN:-Unix Makefiles}"
+  # Configure: cmake compiler probes run in the shim; conftest-shaped
+  # filenames get auto-realise-mode so probes see real .o files.
+  nixgg run -- cmake -S . -B build \
+    -G "Unix Makefiles" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DFMT_TEST=OFF -DFMT_DOC=OFF \
+    -DBUILD_SHARED_LIBS=OFF
 
-# 1. cmake configure — realise mode. Probes need real .o outputs.
-"'"$here"'/nixgg" run -- cmake -S . -B build -G "$GEN" \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DFMT_TEST=OFF \
-  -DFMT_DOC=OFF \
-  -DBUILD_SHARED_LIBS=OFF 2>&1 | tail -5
+  # Build: placeholder mode + force at end.
+  nixgg build --target build/libfmt.a -- \
+    cmake --build build -j'"$NIXGG_JOBS"'
 
-# 2. cmake build — either straight realise, or placeholder + force.
-if [[ "${NIXGG_MODE:-realise}" == placeholder ]]; then
-  "'"$here"'/nixgg" build \
-    --target build/libfmt.a \
-    -- cmake --build build -j"$NIXGG_JOBS"
-else
-  "'"$here"'/nixgg" run -- cmake --build build -j"$NIXGG_JOBS"
-fi
-
-ls -l build/libfmt.a
+  ls -l build/libfmt.a
 '
-
-exec "$BOOTSTRAP_NIX" develop "$here#fmt-env" --command bash -c "$INNER_SCRIPT"
