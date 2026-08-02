@@ -65,7 +65,8 @@ invalidation:
 ├── thunks/     ← per-derivation Nix expression files
 │   ├── <thunk-id>.nix                   the expression itself
 │   ├── .tid.<tu-id>          marker: last-known thunk-id + built store path
-│   └── .argv.<argv-hash>     first-tier cache: same argv → same store path
+│   ├── .argv.<argv-hash>     first-tier compile cache: same argv → same store path
+│   └── .link.<argv-hash>     first-tier link cache: same argv+inputs → same store path
 ├── srcs/       ← per-TU staging dirs (hardlinks to source + headers)
 ├── scans/      ← cached scan-headers.sh output
 └── symlinks/   ← manifest: thunk-id → caller-visible symlink paths
