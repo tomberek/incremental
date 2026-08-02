@@ -10,7 +10,7 @@
   bashRoot      ? (import ./toolchain.nix).bashRoot,
   coreutilsRoot ? (import ./toolchain.nix).coreutilsRoot,
   toolBasename,            # "g++", "cc", "gcc", …
-  srcTree,                 # /nix/store/…-src-…   (from `nix store add`)
+  srcTree,                 # path expression → Nix imports the tree at eval time
   source,                  # relative path inside srcTree, e.g. "main.cc"
   outName,                 # object filename, e.g. "main.o"
   flagsJSON,               # JSON string, e.g. "[\"-O2\",\"-Wall\"]"
@@ -26,7 +26,10 @@ let
   bash        = pureStorePath bashRoot;
   coreutils   = pureStorePath coreutilsRoot;
   compiler    = pureStorePath compilerRoot;
-  src         = pureStorePath srcTree;
+  # srcTree comes in as a path expression (a `../srcs/<tu-id>` literal
+  # emitted by the driver). Nix imports the referenced directory at
+  # eval time and interpolates to `/nix/store/<hash>-<basename>` here.
+  src         = srcTree;
   flags       = builtins.fromJSON flagsJSON;
   quotedFlags = builtins.concatStringsSep " " (map (f: "'${f}'") flags);
   storeDeps   = map pureStorePath (builtins.fromJSON storeDepsJSON);

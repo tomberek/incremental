@@ -181,26 +181,32 @@ if (( ${#store_iflags[@]} )); then
 fi
 nixgg::log "  project root: $project_root"
 
-# ── 3. Stage source + headers into a tmp dir, `nix store add` ─────
+# ── 3. Stage source + headers into .nixgg/srcs/<tu-id>/ ─────────────
+# Each TU gets its own staging dir populated with hardlinks. Reused
+# across rebuilds when nothing changed (inode-match check). The thunk
+# references the dir as a relative path so Nix imports it at eval time,
+# no `nix store add` round-trip per shim invocation.
 
 src_abs=$(realpath -m "$source")
 src_rel="${src_abs#"$project_root"/}"
 
-staged=$(mktemp -d -t nixgg-stage-XXXXXX)
-trap 'rm -rf "$scan_out" "$scan_err" "$staged"' EXIT
+# TU identity: stable per output-path across rebuilds, filesystem-safe.
+# The output is typically a relative path like `src/foo/bar.o`; we
+# slugify to `src-foo-bar` so the dir name doesn't need escaping.
+tu_id=$(printf '%s' "${output%.o}" | tr '/' '-' | tr -c 'A-Za-z0-9._-' '_')
 
-install -Dm644 "$src_abs" "$staged/$src_rel"
+stage_args=( "$src_abs" "$src_rel" )
 for k in "${!headers[@]}"; do
-  install -Dm644 "${headers[k]}" "$staged/${header_rels[k]}"
+  stage_args+=( "${headers[k]}" "${header_rels[k]}" )
 done
+staged=$(nixgg::stage_sources "$tu_id" "$project_root" "${stage_args[@]}")
 
-src_stem="${source##*/}"
-src_stem="${src_stem%.*}"
-nixgg::nix_env_setup
-src_store=$("$NIXGG_NIX" store add --name "src-$src_stem" "$staged")
-rm -rf "$staged"
-trap 'rm -f "$scan_out" "$scan_err"' EXIT
-nixgg::log "  staged src: $src_store  (source @ $src_rel)"
+# Relative path from thunk dir to staging dir, for the Nix expression.
+# Thunks live in $_NIXGG_THUNKS_DIR/, srcs live in $_NIXGG_SRCS_DIR/;
+# both share the same parent (.nixgg/), so the relative form is
+# `../srcs/<tu-id>`.
+src_relpath="../$(basename "$_NIXGG_SRCS_DIR")/$tu_id"
+nixgg::log "  staged src: $staged  (source @ $src_rel)"
 
 # ── 4. Build sandbox_flags = passthrough (minus include search) + staged + store ─
 
@@ -235,7 +241,7 @@ store_deps_json=$(nixgg::store_deps_from "$flags_json" "$wrapper_env")
 expr=$(cat <<NIX
 import $NIXGG_NIX_HELPERS/builder.nix {
   toolBasename   = "$tool_basename";
-  srcTree        = "$src_store";
+  srcTree        = $src_relpath;
   source         = "$src_rel";
   outName        = "$out_basename";
   flagsJSON      = ''$flags_json'';
@@ -265,6 +271,6 @@ t1=$(date +%s.%N)
 nixgg::log "  built:      $built"
 nixgg::link_store_to_output "$built" "$output"
 
-extras=$(jq -cn --arg tool "$TOOL" --arg source "$source" --arg src_store "$src_store" \
-  '{tool: $tool, source: $source, src_store: $src_store}')
+extras=$(jq -cn --arg tool "$TOOL" --arg source "$source" --arg staged "$staged" \
+  '{tool: $tool, source: $source, staged: $staged}')
 nixgg::emit_derivation compile output "$output" "$t0" "$t1" "$built" '[]' "$extras"

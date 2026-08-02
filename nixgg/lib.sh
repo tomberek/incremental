@@ -35,6 +35,12 @@ _NIXGG_THUNKS_DIR="${NIXGG_THUNKS_DIR:-$PWD/.nixgg/thunks}"
 # `cmd_force` uses this to promote every symlink of every realised
 # thunk, so we don't need a post-hoc filesystem sweep.
 _NIXGG_SYMLINKS_DIR="${NIXGG_SYMLINKS_DIR:-$(dirname "$_NIXGG_THUNKS_DIR")/symlinks}"
+# Per-TU staging dirs — one per compilation unit, populated with
+# hardlinks to source + discovered headers. Thunks reference these
+# via `srcTree = ../srcs/<tu-id>;` (a relative path expression),
+# so Nix imports the dir at eval time and we avoid `nix store add`
+# on every shim invocation.
+_NIXGG_SRCS_DIR="${NIXGG_SRCS_DIR:-$(dirname "$_NIXGG_THUNKS_DIR")/srcs}"
 _NIXGG_LOG="${NIXGG_LOG:-}"
 
 # @rspfile expansion lives in shims/_dispatch.sh (needs to run before
@@ -253,6 +259,71 @@ nixgg::emit() {
     >> "$_NIXGG_LOG"
 }
 
+# Materialize (or reuse) `.nixgg/srcs/<tu_id>/` — a directory of
+# hardlinks to $src_abs + every header path. `stage_paths_rel` is a
+# parallel array of the paths *inside* the staging dir (matching what
+# gets addressed by the compile as `source = "<rel>"`).
+#
+# Reuse policy: walk the target list; if every hardlink already exists
+# with the same inode as the current original, keep the dir as-is. Any
+# mismatch → nuke + rebuild.
+#
+# Emits the abs path of the staging dir on stdout.
+nixgg::stage_sources() {
+  local tu_id="$1" project_root="$2"; shift 2
+  # Remaining args come in pairs: <abs> <rel>. `install` and the
+  # inode-match loop both need both, so we pre-split into two arrays.
+  local -a abs_paths=() rel_paths=()
+  while (( $# > 0 )); do
+    abs_paths+=( "$1" )
+    rel_paths+=( "$2" )
+    shift 2
+  done
+
+  local dir="$_NIXGG_SRCS_DIR/$tu_id"
+  mkdir -p "$_NIXGG_SRCS_DIR"
+
+  # Reuse fast path: dir exists, every entry's inode still matches
+  # the current original, no extra files present. If any check fails
+  # we rebuild the whole dir (cheaper than trying to patch it).
+  if [[ -d "$dir" ]]; then
+    local reuse=1
+    local i orig_ino staged_ino
+    for ((i=0; i < ${#abs_paths[@]}; i++)); do
+      if [[ ! -e "$dir/${rel_paths[i]}" ]]; then reuse=0; break; fi
+      orig_ino=$(stat -c '%i' "${abs_paths[i]}" 2>/dev/null || echo 0)
+      staged_ino=$(stat -c '%i' "$dir/${rel_paths[i]}" 2>/dev/null || echo 1)
+      [[ "$orig_ino" == "$staged_ino" ]] || { reuse=0; break; }
+    done
+    if (( reuse )); then
+      # Also check no stale files remain (e.g. a header was #include-removed).
+      local have want
+      want=$(printf '%s\n' "${rel_paths[@]}" | sort -u)
+      have=$(cd "$dir" && find . -type f -o -type l 2>/dev/null | sed 's|^\./||' | sort -u)
+      if [[ "$want" == "$have" ]]; then
+        printf '%s' "$dir"
+        return 0
+      fi
+    fi
+    # Any mismatch → rebuild from scratch.
+    rm -rf "$dir"
+  fi
+
+  mkdir -p "$dir"
+  local i
+  for ((i=0; i < ${#abs_paths[@]}; i++)); do
+    mkdir -p "$dir/$(dirname "${rel_paths[i]}")"
+    # Hardlink first; fall back to copy if the src is on a different
+    # filesystem or hardlinking fails. We DO NOT chmod the staging
+    # — that would apply to the original inode too, making the
+    # working-tree source read-only.
+    ln "${abs_paths[i]}" "$dir/${rel_paths[i]}" 2>/dev/null \
+      || install -Dm644 "${abs_paths[i]}" "$dir/${rel_paths[i]}"
+  done
+
+  printf '%s' "$dir"
+}
+
 # Which env vars does the Nix gcc-wrapper look for?
 _NIXGG_WRAPPER_ENV_KEYS=(
   NIX_CFLAGS_COMPILE
@@ -355,14 +426,21 @@ nixgg::inputs_nix_from_json() {
 }
 
 # Run `nix build` against the alt store on the given expression body,
-# print the resulting /nix/store/... path. We route through a temp
+# print the resulting /nix/store/... path. We route through
 # `--file <foo.nix>` because `nix build --expr` implies pure-eval mode
 # in newer Nix, which forbids `import /nix/store/…` calls (which every
 # thunk uses to reach the flake-realised helpers).
+#
+# The file is written inside $NIXGG_THUNKS_DIR (not /tmp), because the
+# expression may contain relative-path references (`srcTree = ../srcs/<tu-id>`)
+# that Nix resolves against the file's own directory. Placeholder-mode
+# thunks live there too, so realise mode using the same directory keeps
+# path resolution consistent.
 nixgg::nix_build_expr() {
   local expr="$1" tmp out
   nixgg::nix_env_setup
-  tmp=$(mktemp -t nixgg-expr-XXXXXX.nix)
+  mkdir -p "$_NIXGG_THUNKS_DIR"
+  tmp=$(mktemp "$_NIXGG_THUNKS_DIR/expr-XXXXXX.nix")
   # Ensure the temp file is cleaned up even on error.
   trap 'rm -f "$tmp"' RETURN
   printf '%s\n' "$expr" > "$tmp"
