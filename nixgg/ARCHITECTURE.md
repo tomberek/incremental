@@ -63,10 +63,17 @@ invalidation:
 ```
 .nixgg/
 ├── thunks/     ← per-derivation Nix expression files
+│   ├── <thunk-id>.nix                   the expression itself
+│   ├── .tid.<tu-id>          marker: last-known thunk-id + built store path
+│   └── .argv.<argv-hash>     first-tier cache: same argv → same store path
 ├── srcs/       ← per-TU staging dirs (hardlinks to source + headers)
 ├── scans/      ← cached scan-headers.sh output
 └── symlinks/   ← manifest: thunk-id → caller-visible symlink paths
 ```
+
+The `.argv.<hash>` markers are what makes warm rebuilds fast — hashing
+argv is cheap, and a hit means we can skip scan-headers, staging, and
+expression building entirely.
 
 ### `thunks/<id>.nix`
 
@@ -109,6 +116,14 @@ Also lives here: **`.tid.<tu-id>`** — a one-line file
 successful realise. Read on the next shim invocation to decide "same
 inputs as last time?" — if so, skip `nix build` entirely and relink
 the output.
+
+And **`.argv.<argv-hash>`** — a one-line file
+`<thunk-id>\t<built-store-path>\t<scan-cache-key>`. This is the
+*first-tier* short-circuit: hashing argv is cheap, and a matching
+entry lets us skip scan-headers, staging, and expression building
+altogether — as long as the referenced scan cache is still valid
+(mtimes on every header match) AND the recorded store path still
+exists. See "Flow" section below for how it slots in.
 
 ### `srcs/<tu-id>/`
 
@@ -204,27 +219,37 @@ make → cc (shim on PATH)
   │
   └── compile-driver.sh:
       1. Parse argv → source="ae.c", output="ae.o", flags=[…]
-      2. scan_headers_cached  → cache hit? read .scans/<key>.out+.err
-                                cache miss? run scan-headers.sh, write cache
-                                Result: header list + PROJECT_ROOT + iflags
-      3. stage_sources        → srcs/ae/ exists with matching inodes? reuse.
-                                Otherwise: rm -rf, mkdir, hardlink source+headers.
-                                Sets $_NIXGG_STAGE_DIR, $_NIXGG_STAGE_REUSED.
-      4. Assemble Nix expr:   import .../builder.nix { srcTree = ../srcs/ae; … }
-      5. tid = sha256(expr)
-      6. read .tid.ae         → old tid, old built-store-path
-         if old_tid == tid    → cache hit: relink ae.o → old built, exit
-         AND old_built exists
-      7. else placeholder?    → write thunks/<tid>.nix, symlink ae.o → thunk, exit
-      8. else realise:        → nix_build_expr → temp file in thunks/, nix build --file
-                                relink ae.o → /nix/store/<hash>-tu-ae.o
-                                write .tid.ae = <tid>\t<built>
-                                register gcroot
+      2. argv_hash = sha256(TOOL + argv) — cheap
+         read .argv.<argv_hash>       → cached tid + built + scan_key
+         if scan_cache_fresh(scan_key) — batch stat on .deps
+             AND cached built path exists
+             → argv-cache hit: relink ae.o → cached built, exit ✓
+      3. scan_headers_cached           → header list + PROJECT_ROOT + iflags
+      4. stage_sources                 → inodes match? reuse. Else rebuild.
+      5. Assemble Nix expr             → import .../builder.nix { … }
+      6. tid = sha256(expr)
+         read .tid.ae                  → old tid, old built-store-path
+         if old_tid == tid             → tid-cache hit: relink and refresh
+             AND old_built exists         .argv.<argv_hash>, exit ✓
+      7. placeholder mode?             → write thunks/<tid>.nix, symlink
+                                          ae.o → thunk, exit
+      8. realise mode:                 → nix_build_expr → nix build --file
+                                          relink ae.o → /nix/store/…-tu-ae.o
+                                          write .tid.ae + .argv.<argv_hash>
+                                          register gcroot
 ```
 
-Hot path in warm state: steps 1, 2 (fast cache), 3 (fast reuse), 4-6
-(deterministic), **exit at 6**. No `nix build`, no `nix store add`,
-no `gcc -MM`. Just bash + jq + stat.
+Hot path in warm state: steps 1-2 fire the argv-cache and exit before
+we ever touch scan-headers or the filesystem beyond one `stat` batch.
+That path is ~15ms in shell. On a redis warm rebuild all ~120 TU
+shims take this branch.
+
+Slower fallbacks:
+- Step 6 (tid-cache): fires when argv-cache missed but staging /
+  scan-headers still produce byte-identical inputs. Cost: everything
+  in steps 3-5 (~100ms) but no `nix build`.
+- Step 8: the full path, ~200ms of shell + however long `nix build`
+  takes to evaluate + build.
 
 ## Modes
 
@@ -285,8 +310,11 @@ resulting store path, elapsed wall clock, and a cache-hit heuristic.
 
 Types of events emitted:
 
-- `cache_hit` — realise-mode short-circuit fired (tid match + store
-  path exists). Zero real work happened.
+- `argv_cache_hit` — first-tier short-circuit fired. Zero real work,
+  no scan-headers, no staging. Just relink.
+- `cache_hit` — second-tier short-circuit fired (thunk id matched
+  even though argv-cache missed). Scan-headers + staging ran; the
+  `nix build` was skipped.
 - `thunk` — placeholder mode wrote a thunk and symlinked.
 - `derivation` — realise mode invoked `nix build` and got a store
   path (either fresh build or Nix eval-cache hit).
