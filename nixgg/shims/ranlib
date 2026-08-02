@@ -1,3 +1,1 @@
-#!/usr/bin/env bash
-. "$NIXGG_ROOT/shims/_dispatch.sh"
-exec "$NIXGG_ROOT/ar-driver.sh" ranlib "$@"
+../bin/nixgg

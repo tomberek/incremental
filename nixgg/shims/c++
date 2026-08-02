@@ -1,8 +1,1 @@
-#!/usr/bin/env bash
-. "$NIXGG_ROOT/shims/_dispatch.sh"
-for a in "$@"; do
-  if [[ "$a" == "-c" ]]; then
-    exec "$NIXGG_ROOT/compile-driver.sh" c++ "$@"
-  fi
-done
-exec "$NIXGG_ROOT/link-driver.sh" c++ "$@"
+../bin/nixgg

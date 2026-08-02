@@ -1,0 +1,4 @@
+bin/
+example/.nixgg/
+example/*.o
+example/hello
