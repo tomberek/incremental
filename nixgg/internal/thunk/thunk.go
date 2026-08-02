@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/tbereknyei/nixgg/internal/paths"
 )
@@ -77,6 +78,15 @@ func Write(l paths.Layout, id ID, expr string) (string, error) {
 // entry from the promoted registry — the shim is authoritative about
 // what a file is now, and a re-shim invalidates the last
 // "promoted from store" record for this path.
+//
+// We also touch the thunk file's mtime to `now`, whether we just
+// wrote it or reused a byte-identical one. Reason: make follows
+// symlinks with stat(2), so `util.o (follow) = thunk-mtime`. If the
+// thunk mtime never changes — because our idempotent Write is a
+// no-op when the content matches — make would see .o's target mtime
+// as ancient, treat downstream targets (hello) as already
+// up-to-date relative to it, and skip the link step. Bumping the
+// thunk mtime tells make "yes, this output was just refreshed."
 func LinkPlaceholder(l paths.Layout, output, thunkPath string) error {
 	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
 		return err
@@ -87,6 +97,9 @@ func LinkPlaceholder(l paths.Layout, output, thunkPath string) error {
 	if err := os.Symlink(thunkPath, output); err != nil {
 		return fmt.Errorf("symlink %s -> %s: %w", output, thunkPath, err)
 	}
+	// Refresh the thunk's mtime. See docstring above.
+	now := time.Now()
+	_ = os.Chtimes(thunkPath, now, now)
 	// Drop the promoted registry entry (if any). Any future classify
 	// on `output` will resolve the symlink and see it points at a
 	// thunk file — the correct answer.
