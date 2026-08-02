@@ -234,10 +234,7 @@ store_deps_json=$(nixgg::store_deps_from "$flags_json" "$wrapper_env")
 
 expr=$(cat <<NIX
 import $NIXGG_NIX_HELPERS/builder.nix {
-  compilerRoot   = "$NIXGG_COMPILER_ROOT";
   toolBasename   = "$tool_basename";
-  bashRoot       = "$NIXGG_BASH_ROOT";
-  coreutilsRoot  = "$NIXGG_COREUTILS_ROOT";
   srcTree        = "$src_store";
   source         = "$src_rel";
   outName        = "$out_basename";

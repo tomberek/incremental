@@ -49,9 +49,24 @@
           # The nix/ helper directory (builder.nix, linker.nix,
           # archiver.nix, pure-store-path.nix) imported into the store
           # once so drivers can `import` them by absolute store path
-          # under pure-eval mode.
+          # under pure-eval mode. We also generate toolchain.nix
+          # alongside them with the pinned compiler/bash/coreutils
+          # roots, so every thunk can `import ./toolchain.nix` instead
+          # of duplicating those store paths inline.
           nixHelpers = pkgs.runCommand "nixgg-nix" { } ''
             cp -r ${./nix} $out
+            chmod -R u+w $out
+            cat > $out/toolchain.nix <<'EOF'
+            # Toolchain paths pinned by nixgg's flake.lock. Every thunk
+            # imports this file rather than duplicating the store paths
+            # in its own body — shrinks thunks, and toolchain rev-bumps
+            # only touch this file's content-hash.
+            {
+              compilerRoot  = "${toolchain.gcc}";
+              bashRoot      = "${toolchain.bash}";
+              coreutilsRoot = "${toolchain.coreutils}";
+            }
+            EOF
           '';
 
           toolchainJson = pkgs.writeTextFile {

@@ -103,9 +103,6 @@ store_deps_json=$(nixgg::store_deps_from '[]' "$wrapper_env")
 
 expr=$(cat <<NIX
 import $NIXGG_NIX_HELPERS/archiver.nix {
-  compilerRoot   = "$NIXGG_COMPILER_ROOT";
-  bashRoot       = "$NIXGG_BASH_ROOT";
-  coreutilsRoot  = "$NIXGG_COREUTILS_ROOT";
   outName        = "$archive_basename";
   inputs         = $inputs_nix;
   arFlags        = "$modifiers";

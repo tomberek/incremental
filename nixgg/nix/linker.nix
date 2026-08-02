@@ -6,10 +6,10 @@
 # the store). Either way, `${item.drv}/${item.name}` interpolates to
 # the linker CLI.
 {
-  compilerRoot,
+  compilerRoot  ? (import ./toolchain.nix).compilerRoot,
+  bashRoot      ? (import ./toolchain.nix).bashRoot,
+  coreutilsRoot ? (import ./toolchain.nix).coreutilsRoot,
   toolBasename,
-  bashRoot,
-  coreutilsRoot,
   outName,
   inputs,
   flagsJSON,

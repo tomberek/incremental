@@ -4,11 +4,12 @@
 # this file does NOT depend on <nixpkgs> and does no fetching — that
 # keeps parallel invocations from racing on nixpkgs input evaluation.
 {
-  # /nix/store/…-gcc-wrapper-…    (a directory containing bin/g++, bin/cc, …)
-  compilerRoot,
+  # Toolchain roots — default to the pinned versions in toolchain.nix.
+  # Callers can override individually if they need to (unusual).
+  compilerRoot  ? (import ./toolchain.nix).compilerRoot,
+  bashRoot      ? (import ./toolchain.nix).bashRoot,
+  coreutilsRoot ? (import ./toolchain.nix).coreutilsRoot,
   toolBasename,            # "g++", "cc", "gcc", …
-  bashRoot,                # /nix/store/…-bash-…
-  coreutilsRoot,           # /nix/store/…-coreutils-…
   srcTree,                 # /nix/store/…-src-…   (from `nix store add`)
   source,                  # relative path inside srcTree, e.g. "main.cc"
   outName,                 # object filename, e.g. "main.o"

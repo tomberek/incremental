@@ -2,9 +2,9 @@
 #
 # `inputs` is a native Nix list of { drv, name }. Same shape as linker.nix.
 {
-  compilerRoot,
-  bashRoot,
-  coreutilsRoot,
+  compilerRoot  ? (import ./toolchain.nix).compilerRoot,
+  bashRoot      ? (import ./toolchain.nix).bashRoot,
+  coreutilsRoot ? (import ./toolchain.nix).coreutilsRoot,
   outName,
   inputs,
   arFlags ? "cru",
