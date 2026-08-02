@@ -351,11 +351,30 @@ nixgg::scan_headers_cached() {
   out_file="$key.out"; err_file="$key.err"; deps_file="$key.deps"
 
   if [[ -f "$deps_file" ]]; then
-    local dep_ok=1 line dep_path dep_mtime cur_mtime
-    while IFS=$'\t' read -r dep_path dep_mtime; do
-      cur_mtime=$(stat -c '%Y' "$dep_path" 2>/dev/null || echo -)
-      if [[ "$cur_mtime" != "$dep_mtime" ]]; then dep_ok=0; break; fi
+    # Batch the mtime lookup: one `stat` call for every path in .deps.
+    # `stat -c '%Y'` prints one line per arg in argv order; empty lines
+    # signal "no such file" (from --format on missing paths via ENOENT →
+    # we get an error line on stderr; we use -- and let missing → -.
+    # Simpler: readarray the paths, run stat with the whole list, compare
+    # line-by-line to the .deps mtimes.
+    local -a dep_paths=() dep_mtimes=() cur_mtimes=()
+    while IFS=$'\t' read -r p m; do
+      dep_paths+=( "$p" ); dep_mtimes+=( "$m" )
     done < "$deps_file"
+    if (( ${#dep_paths[@]} > 0 )); then
+      # `stat` exits nonzero if any path is missing, but still prints
+      # the ones that succeeded. On ENOENT we substitute "-" so the
+      # comparison correctly fails.
+      mapfile -t cur_mtimes < <(stat -c '%Y' -- "${dep_paths[@]}" 2>/dev/null)
+      # Pad cur_mtimes if stat dropped entries.
+      while (( ${#cur_mtimes[@]} < ${#dep_paths[@]} )); do
+        cur_mtimes+=( "-" )
+      done
+    fi
+    local dep_ok=1 i
+    for ((i = 0; i < ${#dep_paths[@]}; i++)); do
+      if [[ "${cur_mtimes[i]}" != "${dep_mtimes[i]}" ]]; then dep_ok=0; break; fi
+    done
     if (( dep_ok )); then
       cat "$out_file"
       cat "$err_file" >&2
@@ -376,17 +395,17 @@ nixgg::scan_headers_cached() {
     return 1
   fi
 
-  # Record source + every discovered header's mtime.
+  # Record source + every discovered header's mtime. Single `stat`
+  # call over the whole batch keeps this at one fork per shim.
   local src_abs
   src_abs=$(realpath -m "$source")
-  {
-    printf '%s\t%s\n' "$src_abs" "$(stat -c '%Y' "$src_abs" 2>/dev/null || echo -)"
-    # Each stdout line is "<abs>\t<rel>" — key on abs.
-    awk -F'\t' '{print $1}' "$tmp_out" | while IFS= read -r abs; do
-      [[ -n "$abs" ]] || continue
-      printf '%s\t%s\n' "$abs" "$(stat -c '%Y' "$abs" 2>/dev/null || echo -)"
-    done
-  } > "$deps_file"
+  local -a all_paths=( "$src_abs" )
+  while IFS=$'\t' read -r abs _rest; do
+    [[ -n "$abs" ]] && all_paths+=( "$abs" )
+  done < "$tmp_out"
+  # `stat -c '%n\t%Y'` prints "<path>\t<mtime>" per line; perfect for
+  # our deps format, no per-file fork.
+  stat -c '%n	%Y' -- "${all_paths[@]}" 2>/dev/null > "$deps_file"
   mv "$tmp_out" "$out_file"
   mv "$tmp_err" "$err_file"
 
@@ -418,30 +437,37 @@ nixgg::_detect_triple() {
 }
 
 nixgg::wrapper_env_json() {
-  local triple base val out='{}'
+  local triple base val
   triple=$(nixgg::_detect_triple)
 
+  # Collect (key, value) pairs in an array, then hand them all to one
+  # jq invocation via --args. Cuts 5-9 jq forks per shim to 1; jq
+  # handles JSON escaping so we don't touch the values.
+  local -a kv=()
   if [[ -n "$triple" ]]; then
-    out=$(printf '%s' "$out" | jq -cS \
-      --arg k "NIX_CC_WRAPPER_TARGET_HOST_$triple" \
-      '. + {($k): "1"}')
+    kv+=( "NIX_CC_WRAPPER_TARGET_HOST_$triple" "1" )
   fi
-
   for base in "${_NIXGG_WRAPPER_ENV_KEYS[@]}"; do
     val="${!base:-}"
     if [[ -n "$triple" ]]; then
       local suffixed="${base}_${triple//-/_}"
-      if [[ -n "${!suffixed:-}" ]]; then
-        val="${!suffixed}"
-      fi
+      [[ -n "${!suffixed:-}" ]] && val="${!suffixed}"
     fi
     [[ -z "$val" ]] && continue
-    out=$(printf '%s' "$out" | jq -cS --arg k "$base" --arg v "$val" '. + {($k): $v}')
+    kv+=( "$base" "$val" )
     if [[ -n "$triple" ]]; then
-      out=$(printf '%s' "$out" | jq -cS --arg k "${base}_${triple//-/_}" --arg v "$val" '. + {($k): $v}')
+      kv+=( "${base}_${triple//-/_}" "$val" )
     fi
   done
-  printf '%s' "$out"
+  if (( ${#kv[@]} == 0 )); then
+    printf '{}'
+    return
+  fi
+  jq -cn '
+    reduce range(0; ($ARGS.positional | length); 2) as $i ({};
+      . + {($ARGS.positional[$i]): $ARGS.positional[$i+1]})
+    | to_entries | sort_by(.key) | from_entries
+  ' --args -- "${kv[@]}"
 }
 
 # Given a JSON array of flag strings and (optionally) a JSON object of
