@@ -28,15 +28,30 @@ BOOTSTRAP_NIX="${BOOTSTRAP_NIX:-$(command -v nix)}"
 [[ -x "$BOOTSTRAP_NIX" ]] || fail "no nix on PATH"
 
 # Cache the mosh-env dev shell in a persistent profile — subsequent
-# runs skip flake evaluation (~250ms saved per invocation of nix
-# develop). First run materializes the profile; every one after uses
-# `nix develop <profile>` (positional arg = profile path).
-PROFILE_DIR="${NIXGG_PROFILE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/nixgg}"
-PROFILE="$PROFILE_DIR/mosh-env"
+# runs skip flake evaluation.
+CACHE_DIR="${NIXGG_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/nixgg}"
+PROFILE="$CACHE_DIR/mosh-env"
+ENV_SH="$CACHE_DIR/mosh-env.sh"
 if [[ ! -L "$PROFILE" ]]; then
   info "Building nixgg profile at $PROFILE"
-  mkdir -p "$PROFILE_DIR"
+  mkdir -p "$CACHE_DIR"
   "$BOOTSTRAP_NIX" develop "$here#mosh-env" --profile "$PROFILE" --command true
+fi
+# Additionally: dump the env-vars to a sourceable file so we can skip
+# `nix develop` entirely on warm rebuilds. The dev-shell's contribution
+# is: PATH prepended with toolchain bins, plus PKG_CONFIG_PATH,
+# NIX_CFLAGS_COMPILE, NIX_LDFLAGS, NIX_HARDENING_ENABLE, CC, CXX, and
+# SOURCE_DATE_EPOCH. Anything else we let bash inherit from the outer
+# shell.
+if [[ ! -f "$ENV_SH" || "$PROFILE" -nt "$ENV_SH" ]]; then
+  info "Extracting dev-shell env into $ENV_SH"
+  "$BOOTSTRAP_NIX" develop "$PROFILE" --command bash -c '
+    for v in PATH PKG_CONFIG_PATH NIX_CFLAGS_COMPILE NIX_CFLAGS_COMPILE_x86_64_unknown_linux_gnu NIX_LDFLAGS NIX_LDFLAGS_x86_64_unknown_linux_gnu NIX_HARDENING_ENABLE NIX_HARDENING_ENABLE_x86_64_unknown_linux_gnu NIX_CC_WRAPPER_TARGET_HOST_x86_64_unknown_linux_gnu CC CXX SOURCE_DATE_EPOCH; do
+      val="${!v:-}"
+      [[ -n "$val" ]] && printf "export %s=%q\n" "$v" "$val"
+    done
+  ' > "$ENV_SH.tmp"
+  mv "$ENV_SH.tmp" "$ENV_SH"
 fi
 
 if [[ ! -d "$REDIS_SRC" ]]; then
@@ -79,4 +94,11 @@ else
 fi
 '
 
-exec "$BOOTSTRAP_NIX" develop "$PROFILE" --command bash -c "$INNER_SCRIPT"
+# Source the cached dev-shell env directly — no `nix develop` on the
+# hot path. Fresh shell, our profile's PATH + build vars, exec make.
+exec bash -c "
+  set -a
+  . '$ENV_SH'
+  set +a
+  $INNER_SCRIPT
+"
