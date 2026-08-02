@@ -88,7 +88,10 @@ fi
 #   store <path>   → target → /nix/store/…  (realised earlier)
 #   thunk <path>   → target → …/thunks/<id>.nix (unrealised)
 #   regular|absent → nixgg doesn't own this input → passthrough
-inputs_json='[]'
+#
+# Collect classification once here — used both for the argv-cache key
+# below and for the Nix expression's `inputs` list if we fall through.
+declare -a _input_kinds=() _input_refs=() _input_names=()
 for inp in "${inputs[@]}"; do
   read -r kind ref < <(nixgg::classify_target "$inp")
   case "$kind" in
@@ -98,16 +101,50 @@ for inp in "${inputs[@]}"; do
       _passthrough missing_sidecar "$inp" "$@"
       ;;
   esac
-  # ref_kind in the payload matches lib.sh:inputs_nix_from_json:
-  #   "store" → wrap with `builtins.storePath` in the Nix expr
-  #   "nix"   → `import` the thunk file
-  local_kind="$kind"; [[ "$kind" == thunk ]] && local_kind="nix"
-  inputs_json=$(printf '%s' "$inputs_json" | jq -cS \
-    --arg k "$local_kind" --arg r "$ref" --arg n "$(basename "$inp")" \
-    '. + [{ref_kind: $k, ref: $r, name: $n}]')
+  _input_kinds+=( "$kind" )
+  _input_refs+=(  "$ref"  )
+  _input_names+=( "$(basename "$inp")" )
 done
 
 nixgg::log "link $output <- $(printf '%s ' "${inputs[@]##*/}")"
+
+# ── Argv-keyed short-circuit for the link ──────────────────────────
+# Key covers: tool, full argv, and each input's classified ref. If any
+# .o's underlying store path changed (because it was recompiled), the
+# key differs and we re-link. Otherwise: skip `nix build` entirely.
+_link_argv_hash=$(
+  {
+    printf '%s\n' "$TOOL"
+    printf '%s\n' "$@"
+    for i in "${!_input_names[@]}"; do
+      printf '%s\t%s\t%s\n' "${_input_names[i]}" "${_input_kinds[i]}" "${_input_refs[i]}"
+    done
+  } | sha256sum | cut -c1-32
+)
+_link_argv_marker="$_NIXGG_THUNKS_DIR/.link.$_link_argv_hash"
+if [[ -f "$_link_argv_marker" ]]; then
+  IFS=$'\t' read -r _cached_built < "$_link_argv_marker" || true
+  if [[ -n "$_cached_built" ]]; then
+    _cached_local=$(nixgg::resolve_store_path "$_cached_built")
+    out_basename=$(basename "$output")
+    if [[ -e "$_cached_local/$out_basename" ]]; then
+      nixgg::link_store_to_output "$_cached_built" "$output"
+      nixgg::log "argv-cache hit link $output -> $_cached_built"
+      nixgg::emit "$(jq -cn --arg output "$output" --arg built "$_cached_built" \
+        '{event: "link", kind: "argv_cache_hit", output: $output, built: $built}')"
+      exit 0
+    fi
+  fi
+fi
+
+# ── Assemble the classified inputs into JSON for the Nix expression ─
+inputs_json='[]'
+for i in "${!_input_names[@]}"; do
+  local_kind="${_input_kinds[i]}"; [[ "$local_kind" == thunk ]] && local_kind="nix"
+  inputs_json=$(printf '%s' "$inputs_json" | jq -cS \
+    --arg k "$local_kind" --arg r "${_input_refs[i]}" --arg n "${_input_names[i]}" \
+    '. + [{ref_kind: $k, ref: $r, name: $n}]')
+done
 
 # ── Build the thunk payload ───────────────────────────────────────
 wrapper_env=$(nixgg::wrapper_env_json)
@@ -162,4 +199,6 @@ t1=$(date +%s.%N)
 
 nixgg::log "  built: $built"
 nixgg::link_store_to_output "$built" "$output"
+mkdir -p "$_NIXGG_THUNKS_DIR"
+printf '%s\n' "$built" > "$_link_argv_marker"
 nixgg::emit_derivation link output "$output" "$t0" "$t1" "$built" "$inputs_json"
