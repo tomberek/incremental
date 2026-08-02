@@ -48,9 +48,14 @@ export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1700000000}"
 INNER_SCRIPT='
 set -euo pipefail
 cd "$REDIS_SRC"
-# Build vendored deps (hiredis, lua, tre, …) via the plain toolchain
-# first — these are small and not the interesting workload here.
-"'"$here"'/nixgg" run -- make -C src -j"$NIXGG_JOBS" MALLOC=libc persist-settings
+# On a fresh clone `.make-prerequisites` doesn'"'"'t exist yet — running
+# `persist-settings` seeds redis'"'"'s settings-tracking machinery. Once
+# it exists, we skip it: redis'"'"'s Makefile only auto-triggers a
+# persist-settings (= distclean) when FINAL_CFLAGS actually changed,
+# and forcing it unconditionally wipes every intermediate every build.
+if [[ ! -f src/.make-prerequisites ]]; then
+  "'"$here"'/nixgg" run -- make -C src -j"$NIXGG_JOBS" MALLOC=libc persist-settings
+fi
 "'"$here"'/nixgg" run -- make -C deps -j"$NIXGG_JOBS" \
     hiredis linenoise lua hdr_histogram fpconv xxhash tre
 
