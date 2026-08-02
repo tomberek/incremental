@@ -81,17 +81,20 @@ cd "$REDIS_SRC"
 # persist-settings (= distclean) when FINAL_CFLAGS actually changed,
 # and forcing it unconditionally wipes every intermediate every build.
 if [[ ! -f src/.make-prerequisites ]]; then
-  "'"$here"'/nixgg" run -- make -C src -j"$NIXGG_JOBS" MALLOC=libc persist-settings
+  NIXGG_MODE=placeholder "'"$here"'/nixgg" run -- make -C src -j"$NIXGG_JOBS" MALLOC=libc persist-settings
 fi
-"'"$here"'/nixgg" run -- make -C deps -j"$NIXGG_JOBS" \
+
+# Build deps + src in one shot under placeholder mode: every shim (compile,
+# ar, link) writes a .nix thunk instead of calling `nix build`. Nothing
+# hits the Nix daemon during the make walk. After make finishes, one
+# `nixgg force redis-server` (via `nixgg build`) realises the entire DAG
+# in a single `nix build --file` — the shape that a future dynamic-
+# derivation sandbox would produce.
+NIXGG_MODE=placeholder "'"$here"'/nixgg" run -- make -C deps -j"$NIXGG_JOBS" \
     hiredis linenoise lua hdr_histogram fpconv xxhash tre
 
 cd "$REDIS_SRC/src"
-if [[ "${NIXGG_MODE:-realise}" == placeholder ]]; then
-  "'"$here"'/nixgg" build --target redis-server -- make MALLOC=libc -j"$NIXGG_JOBS"
-else
-  "'"$here"'/nixgg" run -- make MALLOC=libc -j"$NIXGG_JOBS" redis-server
-fi
+"'"$here"'/nixgg" build --target redis-server -- make MALLOC=libc -j"$NIXGG_JOBS"
 '
 
 # Source the cached dev-shell env directly — no `nix develop` on the

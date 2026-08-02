@@ -102,7 +102,10 @@ _child_env_prefix() {
 # ── Subcommand implementations ─────────────────────────────────────
 
 cmd_run() {
-  local mode=realise thunks_dir=""
+  # If the caller pre-set NIXGG_MODE, honor it. Otherwise default to
+  # realise. This lets a top-level script wrap several `nixgg run --`
+  # invocations in a single placeholder-mode scope.
+  local mode="${NIXGG_MODE:-realise}" thunks_dir=""
   while (( $# > 0 )); do
     case "$1" in
       --mode)           mode="$2"; shift 2 ;;
