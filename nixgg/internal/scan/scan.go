@@ -349,18 +349,23 @@ func parseMakeDeps(out []byte) []string {
 }
 
 func resolveDep(tok string, userDirs []string) (string, bool) {
+	// Both branches must return a *cleaned* absolute path: gcc -MM
+	// emits paths like "common/../common/zstd_deps.h" that resolve to
+	// the same underlying file as "common/zstd_deps.h", and we dedup
+	// downstream on the abs string. filepath.Clean collapses "..".
 	if filepath.IsAbs(tok) {
-		if _, err := os.Stat(tok); err == nil {
-			return tok, true
+		clean := filepath.Clean(tok)
+		if _, err := os.Stat(clean); err == nil {
+			return clean, true
 		}
 		return "", false
 	}
 	for _, d := range userDirs {
-		p := filepath.Join(d, tok)
+		p := filepath.Join(d, tok) // Join cleans
 		if _, err := os.Stat(p); err == nil {
 			abs, err := filepath.Abs(p)
 			if err == nil {
-				return abs, true
+				return filepath.Clean(abs), true
 			}
 		}
 	}

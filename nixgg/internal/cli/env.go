@@ -95,7 +95,11 @@ what it already knows and errors out if anything's missing.
 	w := bufio.NewWriter(os.Stdout)
 	defer w.Flush()
 	fmt.Fprintf(w, "export NIXGG_ROOT=%s\n", shellQuote(root))
-	fmt.Fprintf(w, "export PATH=%s:${PATH}\n", shellQuote(shims))
+	// PATH gets both shims/ (so make → cc → us) AND bin/ (so the user
+	// can call `nixgg build …` by name). Order: bin first so `nixgg` is
+	// unambiguous even if a shim symlink named `nixgg` ever existed.
+	bin := filepath.Join(root, "bin")
+	fmt.Fprintf(w, "export PATH=%s:%s:${PATH}\n", shellQuote(bin), shellQuote(shims))
 	fmt.Fprintln(w, "export CC=cc")
 	fmt.Fprintln(w, "export CXX=c++")
 	fmt.Fprintf(w, "export NIXGG_STORE=%s\n", shellQuote(store))
