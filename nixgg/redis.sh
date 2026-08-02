@@ -27,6 +27,18 @@ fail() { printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 BOOTSTRAP_NIX="${BOOTSTRAP_NIX:-$(command -v nix)}"
 [[ -x "$BOOTSTRAP_NIX" ]] || fail "no nix on PATH"
 
+# Cache the mosh-env dev shell in a persistent profile — subsequent
+# runs skip flake evaluation (~250ms saved per invocation of nix
+# develop). First run materializes the profile; every one after uses
+# `nix develop <profile>` (positional arg = profile path).
+PROFILE_DIR="${NIXGG_PROFILE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/nixgg}"
+PROFILE="$PROFILE_DIR/mosh-env"
+if [[ ! -L "$PROFILE" ]]; then
+  info "Building nixgg profile at $PROFILE"
+  mkdir -p "$PROFILE_DIR"
+  "$BOOTSTRAP_NIX" develop "$here#mosh-env" --profile "$PROFILE" --command true
+fi
+
 if [[ ! -d "$REDIS_SRC" ]]; then
   info "Cloning redis into $REDIS_SRC"
   mkdir -p "$(dirname "$REDIS_SRC")"
@@ -35,7 +47,7 @@ fi
 
 if [[ "${NIXGG_STAGE_ONLY:-0}" == "1" ]]; then
   info "NIXGG_STAGE_ONLY=1 — dropping into nix develop .#mosh-env"
-  exec "$BOOTSTRAP_NIX" develop "$here#mosh-env"
+  exec "$BOOTSTRAP_NIX" develop "$PROFILE"
 fi
 
 # Redis has no autoconf; just `cd src && make redis-server`. We reuse
@@ -67,4 +79,4 @@ else
 fi
 '
 
-exec "$BOOTSTRAP_NIX" develop "$here#mosh-env" --command bash -c "$INNER_SCRIPT"
+exec "$BOOTSTRAP_NIX" develop "$PROFILE" --command bash -c "$INNER_SCRIPT"
