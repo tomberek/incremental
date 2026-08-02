@@ -94,67 +94,160 @@ func cmdForce(args []string) error {
 	return nil
 }
 
-// realiseAndPromote runs `nix build --file <thunkPath>` on the target
-// thunk, then walks every reachable thunk (via `./<id>.nix` imports)
-// and re-points every caller-visible symlink in each manifest.
+// realiseAndPromote realises the target's whole DAG in one Nix
+// invocation and re-points every caller-visible symlink at its store
+// output.
+//
+// The critical optimisation vs a naïve implementation: **we call Nix
+// exactly once**, not once per intermediate thunk. Nix's eval walks the
+// `import ./<id>.nix` graph natively; all we do is:
+//
+//  1. Walk the graph locally to enumerate the child thunks.
+//  2. Write a helper .nix that exposes each as a named attribute.
+//  3. `nix build --file <helper> <attr>…` — Nix realises everything
+//     under one process, one eval, one daemon session.
+//  4. Parse the printed store paths, one per attr, and promote each
+//     thunk's manifest.
 func realiseAndPromote(l paths.Layout, cfg *toolchain.Config, thunkPath, target string) error {
-	// One nix build realises the whole DAG under this root.
-	storePath, err := nixBuildFile(cfg, thunkPath)
+	// 1. Walk transitively to collect every reachable thunk path.
+	children, err := collectThunks(thunkPath)
 	if err != nil {
 		return err
 	}
-	// Promote the target symlink itself first.
-	if err := promoteToStore(cfg, storePath, target); err != nil {
+
+	// 2. Build the helper expression. Order matters because we correlate
+	// printed store paths back to thunks by position.
+	helper, err := writeForceHelper(l, thunkPath, children)
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "[nixgg force] %s -> %s\n", target, storePath)
+	defer os.Remove(helper)
 
-	// Walk transitive `import ./<id>.nix` and promote every recorded
-	// symlink under each thunk's manifest. Nix's eval cache means each
-	// subsequent per-thunk build is essentially a store-path lookup.
-	visited := map[string]bool{}
+	// 3. One nix build for the whole DAG.
+	attrs := make([]string, 0, 1+len(children))
+	attrs = append(attrs, "root")
+	for i := range children {
+		attrs = append(attrs, fmt.Sprintf("t%d", i))
+	}
+	storePaths, err := nixBuildAttrs(cfg, helper, attrs)
+	if err != nil {
+		return err
+	}
+	if len(storePaths) != len(attrs) {
+		return fmt.Errorf("force: expected %d store paths, got %d", len(attrs), len(storePaths))
+	}
+
+	// 4. Promote symlinks.
+	rootStore := storePaths[0]
+	if err := promoteToStore(cfg, rootStore, target); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[nixgg force] %s -> %s\n", target, rootStore)
+
+	// Root manifest — extra caller-visible symlinks that reference the
+	// same thunk (e.g. two different make targets that hit the same
+	// content-hash).
+	rootID := strings.TrimSuffix(filepath.Base(thunkPath), ".nix")
+	if err := promoteManifest(l, cfg, rootID, rootStore); err != nil {
+		fmt.Fprintf(os.Stderr, "[nixgg force] %s: %v\n", rootID, err)
+	}
+
+	// Child manifests.
+	for i, child := range children {
+		childStore := storePaths[i+1]
+		id := strings.TrimSuffix(filepath.Base(child), ".nix")
+		if err := promoteManifest(l, cfg, id, childStore); err != nil {
+			fmt.Fprintf(os.Stderr, "[nixgg force] %s: %v\n", id, err)
+		}
+	}
+	return nil
+}
+
+// collectThunks walks import ./<id>.nix transitively from root, and
+// returns every child thunk path in a deterministic order. The root
+// itself is NOT in the returned slice.
+func collectThunks(root string) ([]string, error) {
+	visited := map[string]bool{root: true}
+	var out []string
 	var walk func(t string) error
 	walk = func(t string) error {
-		if visited[t] {
-			return nil
-		}
-		visited[t] = true
 		body, err := os.ReadFile(t)
 		if err != nil {
 			return nil // stale reference; ignore
 		}
+		dir := filepath.Dir(t)
 		for _, sib := range findRelativeImports(body) {
-			child := filepath.Join(filepath.Dir(t), sib)
+			child := filepath.Join(dir, sib)
+			if visited[child] {
+				continue
+			}
+			visited[child] = true
 			if _, err := os.Stat(child); err != nil {
 				continue
 			}
-			// Realise the child (eval-cache hit if nothing changed).
-			childStore, err := nixBuildFile(cfg, child)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "[nixgg force] %s: %v\n", child, err)
-				continue
-			}
-			// Promote every recorded symlink under this child's manifest.
-			id := strings.TrimSuffix(filepath.Base(child), ".nix")
-			if err := promoteManifest(l, cfg, id, childStore); err != nil {
-				fmt.Fprintf(os.Stderr, "[nixgg force] %s: %v\n", id, err)
-			}
+			out = append(out, child)
 			if err := walk(child); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	if err := walk(thunkPath); err != nil {
-		return err
+	if err := walk(root); err != nil {
+		return nil, err
 	}
-	// Also promote the root's manifest (in case there are more
-	// caller-visible symlinks than just `target`).
-	rootID := strings.TrimSuffix(filepath.Base(thunkPath), ".nix")
-	if err := promoteManifest(l, cfg, rootID, storePath); err != nil {
-		fmt.Fprintf(os.Stderr, "[nixgg force] %s: %v\n", rootID, err)
+	return out, nil
+}
+
+// writeForceHelper emits a temp .nix file that exposes the root thunk
+// plus every child under numbered attribute names (root, t0, t1, …).
+// The file lives next to the root thunk so relative imports resolve.
+func writeForceHelper(l paths.Layout, root string, children []string) (string, error) {
+	var b strings.Builder
+	b.WriteString("{\n")
+	fmt.Fprintf(&b, "  root = import %q;\n", root)
+	for i, c := range children {
+		fmt.Fprintf(&b, "  t%d = import %q;\n", i, c)
 	}
-	return nil
+	b.WriteString("}\n")
+	tmp, err := os.CreateTemp(filepath.Dir(root), "force-*.nix")
+	if err != nil {
+		return "", err
+	}
+	if _, err := tmp.WriteString(b.String()); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return "", err
+	}
+	return tmp.Name(), nil
+}
+
+// nixBuildAttrs runs `nix build --file <helper> <attr>...` and returns
+// the printed store paths in the same order as attrs.
+func nixBuildAttrs(cfg *toolchain.Config, helper string, attrs []string) ([]string, error) {
+	args := []string{"build", "-L", "--no-link", "--print-out-paths", "--file", helper}
+	args = append(args, attrs...)
+	cmd := exec.Command(cfg.Nix, args...)
+	cmd.Env = append(os.Environ(),
+		"NIX_REMOTE=",
+		"NIX_CONFIG=experimental-features = nix-command flakes ca-derivations\nstore = "+cfg.Store+"\n",
+	)
+	cmd.Stderr = os.Stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("nix build --file %s: %w", helper, err)
+	}
+	// Output is one store path per attr, in argument order.
+	var paths []string
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if line != "" {
+			paths = append(paths, line)
+		}
+	}
+	return paths, nil
 }
 
 // relImportRE matches `import ./<32-hex>.nix` — the shape our thunks

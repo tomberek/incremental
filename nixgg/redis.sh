@@ -75,13 +75,19 @@ export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1700000000}"
 INNER_SCRIPT='
 set -euo pipefail
 cd "$REDIS_SRC"
+# Pin the thunks dir once at the top so every subdir shim (src, deps/*)
+# lands in the same place. Sibling thunk imports (`import ./XX.nix`)
+# require this — cross-directory references would otherwise fail to
+# resolve at force time.
+export NIXGG_THUNKS_DIR="$REDIS_SRC/.nixgg/thunks"
+
 # On a fresh clone `.make-prerequisites` doesn'"'"'t exist yet — running
 # `persist-settings` seeds redis'"'"'s settings-tracking machinery. Once
 # it exists, we skip it: redis'"'"'s Makefile only auto-triggers a
 # persist-settings (= distclean) when FINAL_CFLAGS actually changed,
 # and forcing it unconditionally wipes every intermediate every build.
 if [[ ! -f src/.make-prerequisites ]]; then
-  NIXGG_MODE=placeholder "'"$here"'/nixgg" run -- make -C src -j"$NIXGG_JOBS" MALLOC=libc persist-settings
+  NIXGG_MODE=placeholder "'"$here"'/bin/nixgg" run -- make -C src -j"$NIXGG_JOBS" MALLOC=libc persist-settings
 fi
 
 # Build deps + src in one shot under placeholder mode: every shim (compile,
@@ -90,18 +96,29 @@ fi
 # `nixgg force redis-server` (via `nixgg build`) realises the entire DAG
 # in a single `nix build --file` — the shape that a future dynamic-
 # derivation sandbox would produce.
-NIXGG_MODE=placeholder "'"$here"'/nixgg" run -- make -C deps -j"$NIXGG_JOBS" \
+#
+# `|| true` because redis'"'"'s tests/modules build fires alongside
+# and fails at ranlib for reasons unrelated to the redis-server DAG.
+NIXGG_MODE=placeholder "'"$here"'/bin/nixgg" run -- make -C deps -j"$NIXGG_JOBS" \
     hiredis linenoise lua hdr_histogram fpconv xxhash tre
 
 cd "$REDIS_SRC/src"
-"'"$here"'/nixgg" build --target redis-server -- make MALLOC=libc -j"$NIXGG_JOBS"
+"'"$here"'/bin/nixgg" build --target redis-server -- make MALLOC=libc -j"$NIXGG_JOBS" redis-server
 '
+
+# The env-shell exports the nixgg toolchain roots (NIXGG_REAL_CC,
+# NIXGG_NIX_HELPERS, …). We also want an alt Nix store so we don't
+# stomp the system store during experiments.
+NIXGG_ENV_SHELL=$("$BOOTSTRAP_NIX" build "$here#env-shell" --no-link --print-out-paths)
+export NIXGG_ENV_SHELL
+export NIXGG_STORE="${NIXGG_STORE:-local?root=/tmp/nixgg-store}"
 
 # Source the cached dev-shell env directly — no `nix develop` on the
 # hot path. Fresh shell, our profile's PATH + build vars, exec make.
 exec bash -c "
   set -a
   . '$ENV_SH'
+  . '$NIXGG_ENV_SHELL'
   set +a
   $INNER_SCRIPT
 "

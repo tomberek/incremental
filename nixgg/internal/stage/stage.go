@@ -12,6 +12,8 @@
 package stage
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -180,20 +182,25 @@ func isCrossDeviceOrEPERM(err error) bool {
 	return false
 }
 
-// TUID slugifies an output path into a filesystem-safe cache-dir name.
-// "src/foo/bar.o" → "src-foo-bar"; the stem drops the .o suffix.
-// Two different TUs never collide (different output = different key).
-func TUID(output string) string {
-	// Drop trailing .o if present; keep other extensions (.xo, .lo)
-	// so redis's tests/modules objects don't clash with regular objects.
-	stem := strings.TrimSuffix(output, ".o")
-	// Replace path separators with '-', then scrub non-safe chars to '_'.
+// TUID returns a filesystem-safe cache-dir name for a compile whose
+// output resolves to absOutput. Two different compiles must never
+// collide, and calls from different cwds that happen to have the same
+// -o basename (e.g. redis's `deps/hiredis/sds.o` vs `redis/src/sds.o`)
+// must produce different IDs.
+//
+// We hash the absolute output path and prefix with a short human-
+// readable slug so cache dirs are still greppable.
+func TUID(absOutput string) string {
+	// Human-readable stem — the output basename, minus any .o/.xo/.lo suffix.
+	base := filepath.Base(absOutput)
+	stem := strings.TrimSuffix(base, ".o")
+	stem = strings.TrimSuffix(stem, ".xo")
+	stem = strings.TrimSuffix(stem, ".lo")
+	// Scrub the slug to filesystem-safe chars.
 	var b strings.Builder
 	b.Grow(len(stem))
 	for _, r := range stem {
 		switch {
-		case r == '/':
-			b.WriteByte('-')
 		case r == '.' || r == '_' || r == '-' ||
 			(r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
 			b.WriteRune(r)
@@ -201,5 +208,12 @@ func TUID(output string) string {
 			b.WriteByte('_')
 		}
 	}
-	return b.String()
+	slug := b.String()
+	if slug == "" {
+		slug = "tu"
+	}
+	// Uniqueness comes from the abs-path hash (first 12 hex chars is
+	// plenty for a filesystem-local dir name).
+	h := sha256.Sum256([]byte(absOutput))
+	return slug + "-" + hex.EncodeToString(h[:6])
 }

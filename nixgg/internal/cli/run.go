@@ -24,7 +24,23 @@ func cmdRun(args []string) error {
 			mode = parent
 		}
 	}
-	if err := setupShimEnv(mode, opts.thunksDir); err != nil {
+	// Pin thunks-dir once for the whole child tree, so recursive submakes
+	// (deps/hiredis, deps/lua, …) don't scatter thunks across per-cwd
+	// defaults. If the parent already set NIXGG_THUNKS_DIR, honor it;
+	// otherwise default to $PWD/.nixgg/thunks *of the top-level invocation*.
+	thunksDir := opts.thunksDir
+	if thunksDir == "" {
+		if inherited := os.Getenv("NIXGG_THUNKS_DIR"); inherited != "" {
+			thunksDir = inherited
+		} else {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			thunksDir = filepath.Join(cwd, ".nixgg", "thunks")
+		}
+	}
+	if err := setupShimEnv(mode, thunksDir); err != nil {
 		return err
 	}
 	if len(cmd) == 0 {

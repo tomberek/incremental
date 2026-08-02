@@ -82,7 +82,15 @@ func Compile(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.L
 	for _, h := range scanResult.Headers {
 		entries = append(entries, stage.Entry{Abs: h.Abs, Rel: h.Rel})
 	}
-	tuID := stage.TUID(output)
+	// The tu_id must uniquely identify this compile across the whole
+	// project so cross-directory calls with the same output basename
+	// (e.g. redis src/sds.o vs deps/hiredis/sds.o) don't collide on
+	// the staging dir. Feed TUID the absolute output path.
+	absOut, err := filepath.Abs(output)
+	if err != nil {
+		return err
+	}
+	tuID := stage.TUID(absOut)
 	stageRes, err := stage.Sources(l, tuID, entries)
 	if err != nil {
 		return err
@@ -155,6 +163,18 @@ func parseCompileArgs(args []string) (source, output string, flags []string, ok 
 			i++
 		case strings.HasPrefix(a, "-o") && len(a) > 2:
 			output = a[2:]
+		// Dep-file generation flags — drop them. They target paths
+		// outside our sandbox (relative to make's cwd), so gcc inside
+		// the derivation would try to open cachedObjs/… and fail.
+		// scan-headers already gave us the header list we need.
+		case a == "-M" || a == "-MM" || a == "-MG" || a == "-MP" || a == "-MD" || a == "-MMD":
+			// no-op (single-arg forms)
+		case a == "-MF" || a == "-MT" || a == "-MQ":
+			// two-arg forms; skip the value too
+			if i+1 >= len(args) {
+				return "", "", nil, false
+			}
+			i++
 		case a == "-x" || a == "-Xlinker" || a == "-Xassembler":
 			// Two-arg forms with values that aren't sources; keep both.
 			if i+1 >= len(args) {

@@ -130,8 +130,10 @@ func parseLinkArgs(args []string) (output string, inputs, flags []string, ok boo
 }
 
 func isLinkInput(a string) bool {
+	// .o (object), .a (archive), .xo (redis's position-independent
+	// object for its shared-object test modules), .lo (libtool object).
 	ext := strings.ToLower(filepath.Ext(a))
-	return ext == ".o" || ext == ".a"
+	return ext == ".o" || ext == ".a" || ext == ".xo" || ext == ".lo"
 }
 
 // altStorePrefix returns the on-disk root for `local?root=...` stores.
