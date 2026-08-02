@@ -106,17 +106,16 @@ deps=$("$real_cc" -MM -MG -MF - "$source_rel" "${scan_flags[@]}" 2>/dev/null \
            }
          ')
 
-# 5. Resolve + stage each dep. Emit "<abs>\t<staged-rel>".
-#    Absolute /nix/store/... paths: skip. Others: search cwd + user
-#    -I dirs (in order) for the token; the first match wins.
+# 5a. First pass — resolve each dep to its absolute path. Some sources
+# (like lua's lua_cjson.c → ../../src/solarisfixes.h) reach outside any
+# declared -I dir, so we discover the header via search + widen the
+# project root in pass two.
+src_abs="$(cd "$(dirname "$source_rel" 2>/dev/null || echo .)" && pwd -P)/$(basename "$source_rel")"
+resolved=()
 while IFS= read -r tok; do
   [[ -z "$tok" ]] && continue
-
-  # Absolute path?
   if [[ "$tok" == /* ]]; then
-    case "$tok" in
-      /nix/store/*) continue ;;
-    esac
+    case "$tok" in /nix/store/*) continue ;; esac
     [[ -e "$tok" ]] || continue
     abs="$tok"
   else
@@ -128,30 +127,36 @@ while IFS= read -r tok; do
         break
       fi
     done
-    [[ -z "$abs" ]] && continue  # -MG bare name we can't find
+    [[ -z "$abs" ]] && continue
   fi
-
-  # Skip source itself.
-  src_abs="$(cd "$(dirname "$source_rel" 2>/dev/null || echo .)" && pwd -P)/$(basename "$source_rel")"
   [[ "$abs" == "$src_abs" ]] && continue
+  case "$abs" in /nix/store/*) continue ;; esac
+  resolved+=( "$abs" )
+done <<< "$deps"
 
-  # Skip anything already in the store.
-  case "$abs" in
-    /nix/store/*) continue ;;
-  esac
+# 5b. Widen project_root so every discovered header is inside it.
+for abs in "${resolved[@]:-}"; do
+  [[ -z "$abs" ]] && continue
+  d="$(dirname "$abs")"
+  while [[ "${d#"$project_root"/}" == "$d" && "$d" != "$project_root" ]]; do
+    project_root="${project_root%/*}"
+    [[ -z "$project_root" ]] && { project_root=/; break; }
+  done
+done
 
-  # Stage relative to project_root.
+# 5c. Emit "<abs>\t<staged-rel>" per header.
+for abs in "${resolved[@]:-}"; do
+  [[ -z "$abs" ]] && continue
   if [[ "$abs" == "$project_root"/* ]]; then
     staged="${abs#"$project_root"/}"
   elif [[ "$abs" == "$project_root" ]]; then
     staged="$(basename "$abs")"
   else
-    echo "scan-headers: $abs is outside project root $project_root" >&2
+    echo "scan-headers: $abs is outside project root $project_root (unexpected after widen)" >&2
     exit 1
   fi
-
   printf '%s\t%s\n' "$abs" "$staged"
-done <<< "$deps" | sort -u
+done | sort -u
 
 # 6. Print the project root and store -I flags on stderr for the
 #    caller to consume.

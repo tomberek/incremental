@@ -117,7 +117,7 @@ if (( ${#flags[@]} == 0 )); then
 else
   flags_json=$(printf '%s\n' "${flags[@]}" | jq -R . | jq -s .)
 fi
-tool_basename=$(basename "$NIXGG_REAL_CC")
+tool_basename="$TOOL"
 
 # Assemble the Nix expression once — used verbatim in either mode.
 # Inputs are wrapped either as `builtins.storePath "…"` (already

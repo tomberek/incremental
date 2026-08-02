@@ -140,7 +140,7 @@ scan_out=$(mktemp)
 scan_err=$(mktemp)
 trap 'rm -f "$scan_out" "$scan_err"' EXIT
 
-if ! "$_here/scan-headers.sh" "$NIXGG_REAL_CC" "$source" "${passthrough[@]}" \
+if ! "$_here/scan-headers.sh" "$(dirname "$NIXGG_REAL_CC")/$TOOL" "$source" "${passthrough[@]}" \
       > "$scan_out" 2> "$scan_err"; then
   cat "$scan_err" >&2
   exit 1
@@ -223,7 +223,7 @@ fi
 
 # ── 5. Assemble the Nix expression (same for both modes) ──────────
 wrapper_env=$(nixgg::wrapper_env_json)
-tool_basename=$(basename "$NIXGG_REAL_CC")
+tool_basename="$TOOL"
 out_basename=$(basename "$output")
 if (( ${#sandbox_flags[@]} == 0 )); then
   flags_json='[]'
