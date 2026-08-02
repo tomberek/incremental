@@ -140,7 +140,7 @@ scan_out=$(mktemp)
 scan_err=$(mktemp)
 trap 'rm -f "$scan_out" "$scan_err"' EXIT
 
-if ! "$_here/scan-headers.sh" "$(dirname "$NIXGG_REAL_CC")/$TOOL" "$source" "${passthrough[@]}" \
+if ! nixgg::scan_headers_cached "$(dirname "$NIXGG_REAL_CC")/$TOOL" "$source" "${passthrough[@]}" \
       > "$scan_out" 2> "$scan_err"; then
   cat "$scan_err" >&2
   exit 1
@@ -199,7 +199,10 @@ stage_args=( "$src_abs" "$src_rel" )
 for k in "${!headers[@]}"; do
   stage_args+=( "${headers[k]}" "${header_rels[k]}" )
 done
-staged=$(nixgg::stage_sources "$tu_id" "$project_root" "${stage_args[@]}")
+_NIXGG_STAGE_DIR="" _NIXGG_STAGE_REUSED=""
+nixgg::stage_sources "$tu_id" "$project_root" "${stage_args[@]}"
+staged="$_NIXGG_STAGE_DIR"
+stage_reused="$_NIXGG_STAGE_REUSED"
 
 # Relative path from thunk dir to staging dir, for the Nix expression.
 # Thunks live in $_NIXGG_THUNKS_DIR/, srcs live in $_NIXGG_SRCS_DIR/;
@@ -251,6 +254,12 @@ import $NIXGG_NIX_HELPERS/builder.nix {
 NIX
 )
 
+# Deterministic id of *this* thunk expression — same value the
+# placeholder path computes. Used by the realise-mode short-circuit
+# below to detect when nothing about the compile (source, flags, env,
+# toolchain) has changed vs. the last successful build.
+tid=$(nixgg::thunk_id "$expr")
+
 # ── 6a. Placeholder mode: write .nix thunk, drop marker ──────────
 if [[ "$(nixgg::mode_for "$source")" == "placeholder" ]]; then
   thunk_path=$(nixgg::write_thunk "$expr")
@@ -264,12 +273,46 @@ if [[ "$(nixgg::mode_for "$source")" == "placeholder" ]]; then
 fi
 
 # ── 6b. Realise mode: eval + copy out ────────────────────────────
+# Short-circuit: if the recorded thunk-id for this output matches what
+# we'd build now, AND the output symlink still resolves to a live
+# store path, skip `nix build` entirely. Saves a daemon round-trip per
+# shim on warm rebuilds — the actual point of the whole design.
+# Marker records `<tid>\t<store-path>` from the last successful realise
+# for this TU. On rebuild we can short-circuit purely from this — even
+# if make just deleted the .o symlink, we recreate it pointing at the
+# same store output and skip `nix build`. This is the actual point of
+# the whole staging/caching design.
+tid_marker="$_NIXGG_THUNKS_DIR/.tid.$tu_id"
+old_tid=""; old_built=""
+if [[ -f "$tid_marker" ]]; then
+  IFS=$'\t' read -r old_tid old_built < "$tid_marker" || true
+fi
+if [[ "$old_tid" == "$tid" && -n "$old_built" ]]; then
+  # Realise-mode short-circuit: same thunk id AND the previously-built
+  # store output still exists on disk → just re-link and go.
+  # `link_store_to_output` expects the canonical /nix/store/... path;
+  # we recorded that.
+  built_local=$(nixgg::resolve_store_path "$old_built")
+  if [[ -e "$built_local/$out_basename" ]]; then
+    nixgg::link_store_to_output "$old_built" "$output"
+    nixgg::log "  cache hit:  $output -> $old_built"
+    nixgg::emit "$(jq -cn --arg tool "$TOOL" --arg source "$source" \
+                         --arg output "$output" --arg built "$old_built" \
+                         --arg tid "$tid" \
+      '{event: "compile", kind: "cache_hit", tool: $tool,
+        source: $source, output: $output, built: $built, thunk_id: $tid}')"
+    exit 0
+  fi
+fi
+
 t0=$(date +%s.%N)
 built=$(nixgg::nix_build_expr "$expr")
 t1=$(date +%s.%N)
 
 nixgg::log "  built:      $built"
 nixgg::link_store_to_output "$built" "$output"
+mkdir -p "$_NIXGG_THUNKS_DIR"
+printf '%s\t%s\n' "$tid" "$built" > "$tid_marker"
 
 extras=$(jq -cn --arg tool "$TOOL" --arg source "$source" --arg staged "$staged" \
   '{tool: $tool, source: $source, staged: $staged}')

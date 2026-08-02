@@ -41,6 +41,11 @@ _NIXGG_SYMLINKS_DIR="${NIXGG_SYMLINKS_DIR:-$(dirname "$_NIXGG_THUNKS_DIR")/symli
 # so Nix imports the dir at eval time and we avoid `nix store add`
 # on every shim invocation.
 _NIXGG_SRCS_DIR="${NIXGG_SRCS_DIR:-$(dirname "$_NIXGG_THUNKS_DIR")/srcs}"
+# Cached scan-headers.sh output. Cache key = sha of (source-abs, flags).
+# Invalidation: if the mtime of any file the cached scan listed has
+# advanced past the recorded mtime, we re-run gcc -MM. Saves ~50ms/TU
+# on warm rebuilds (dominant scan-headers cost is spawning gcc).
+_NIXGG_SCANS_DIR="${NIXGG_SCANS_DIR:-$(dirname "$_NIXGG_THUNKS_DIR")/scans}"
 _NIXGG_LOG="${NIXGG_LOG:-}"
 
 # @rspfile expansion lives in shims/_dispatch.sh (needs to run before
@@ -260,15 +265,14 @@ nixgg::emit() {
 }
 
 # Materialize (or reuse) `.nixgg/srcs/<tu_id>/` — a directory of
-# hardlinks to $src_abs + every header path. `stage_paths_rel` is a
-# parallel array of the paths *inside* the staging dir (matching what
-# gets addressed by the compile as `source = "<rel>"`).
+# hardlinks to $src_abs + every header path. Reuse policy: walk the
+# target list; if every hardlink already exists with the same inode as
+# the current original AND no extra files remain, keep the dir as-is.
+# Any mismatch → nuke + rebuild.
 #
-# Reuse policy: walk the target list; if every hardlink already exists
-# with the same inode as the current original, keep the dir as-is. Any
-# mismatch → nuke + rebuild.
-#
-# Emits the abs path of the staging dir on stdout.
+# Sets two globals (avoids a subshell for the caller to inspect status):
+#   _NIXGG_STAGE_DIR      — absolute path of the staging dir
+#   _NIXGG_STAGE_REUSED   — "1" if we kept the existing dir, "" otherwise
 nixgg::stage_sources() {
   local tu_id="$1" project_root="$2"; shift 2
   # Remaining args come in pairs: <abs> <rel>. `install` and the
@@ -282,10 +286,9 @@ nixgg::stage_sources() {
 
   local dir="$_NIXGG_SRCS_DIR/$tu_id"
   mkdir -p "$_NIXGG_SRCS_DIR"
+  _NIXGG_STAGE_DIR="$dir"
 
-  # Reuse fast path: dir exists, every entry's inode still matches
-  # the current original, no extra files present. If any check fails
-  # we rebuild the whole dir (cheaper than trying to patch it).
+  # Reuse fast path.
   if [[ -d "$dir" ]]; then
     local reuse=1
     local i orig_ino staged_ino
@@ -296,16 +299,16 @@ nixgg::stage_sources() {
       [[ "$orig_ino" == "$staged_ino" ]] || { reuse=0; break; }
     done
     if (( reuse )); then
-      # Also check no stale files remain (e.g. a header was #include-removed).
+      # Guard against stale files (e.g. a header was #include-removed
+      # between builds — the file's still on disk from last staging).
       local have want
       want=$(printf '%s\n' "${rel_paths[@]}" | sort -u)
       have=$(cd "$dir" && find . -type f -o -type l 2>/dev/null | sed 's|^\./||' | sort -u)
       if [[ "$want" == "$have" ]]; then
-        printf '%s' "$dir"
+        _NIXGG_STAGE_REUSED=1
         return 0
       fi
     fi
-    # Any mismatch → rebuild from scratch.
     rm -rf "$dir"
   fi
 
@@ -314,14 +317,81 @@ nixgg::stage_sources() {
   for ((i=0; i < ${#abs_paths[@]}; i++)); do
     mkdir -p "$dir/$(dirname "${rel_paths[i]}")"
     # Hardlink first; fall back to copy if the src is on a different
-    # filesystem or hardlinking fails. We DO NOT chmod the staging
-    # — that would apply to the original inode too, making the
+    # filesystem or hardlinking fails. We DO NOT chmod the staging —
+    # that would apply to the original inode too, making the
     # working-tree source read-only.
     ln "${abs_paths[i]}" "$dir/${rel_paths[i]}" 2>/dev/null \
       || install -Dm644 "${abs_paths[i]}" "$dir/${rel_paths[i]}"
   done
+  _NIXGG_STAGE_REUSED=""
+}
 
-  printf '%s' "$dir"
+# Wrapper around scan-headers.sh with an mtime-invalidated cache.
+#
+#   args:   <real-cc> <source> [flags...]
+#   stdout: header list, one per line ("<abs>\t<staged-rel>")
+#   stderr: PROJECT_ROOT=/STAGED_IFLAG=/STORE_IFLAG= lines
+#
+# Cache layout: two files per key under $_NIXGG_SCANS_DIR:
+#   <key>.out       — captured stdout of scan-headers.sh
+#   <key>.err       — captured stderr (PROJECT_ROOT= etc)
+#   <key>.deps      — sha256:mtime per referenced file, one per line;
+#                     read on subsequent runs to check whether any of
+#                     the discovered inputs changed since we scanned.
+#
+# The dep list is (source, all headers). We use `stat -c '%Y'` (mtime,
+# whole-second). Any file added/removed/mtime-advanced → miss.
+nixgg::scan_headers_cached() {
+  local real_cc="$1" source="$2"; shift 2
+  local flags_hash key out_file err_file deps_file
+  # Include real_cc in the key — switching cc <-> c++ has to invalidate.
+  flags_hash=$(printf '%s\n%s\n%s\n' "$real_cc" "$source" "$*" | sha256sum | cut -c1-32)
+  mkdir -p "$_NIXGG_SCANS_DIR"
+  key="$_NIXGG_SCANS_DIR/$flags_hash"
+  out_file="$key.out"; err_file="$key.err"; deps_file="$key.deps"
+
+  if [[ -f "$deps_file" ]]; then
+    local dep_ok=1 line dep_path dep_mtime cur_mtime
+    while IFS=$'\t' read -r dep_path dep_mtime; do
+      cur_mtime=$(stat -c '%Y' "$dep_path" 2>/dev/null || echo -)
+      if [[ "$cur_mtime" != "$dep_mtime" ]]; then dep_ok=0; break; fi
+    done < "$deps_file"
+    if (( dep_ok )); then
+      cat "$out_file"
+      cat "$err_file" >&2
+      return 0
+    fi
+  fi
+
+  # Cache miss. Run the scanner, capture both streams, record dep mtimes.
+  local scan_dir
+  scan_dir="$(dirname "${BASH_SOURCE[0]}")"
+  local tmp_out tmp_err
+  tmp_out=$(mktemp "$_NIXGG_SCANS_DIR/.$flags_hash.out.XXXX")
+  tmp_err=$(mktemp "$_NIXGG_SCANS_DIR/.$flags_hash.err.XXXX")
+  if ! "$scan_dir/scan-headers.sh" "$real_cc" "$source" "$@" \
+        > "$tmp_out" 2> "$tmp_err"; then
+    cat "$tmp_err" >&2
+    rm -f "$tmp_out" "$tmp_err"
+    return 1
+  fi
+
+  # Record source + every discovered header's mtime.
+  local src_abs
+  src_abs=$(realpath -m "$source")
+  {
+    printf '%s\t%s\n' "$src_abs" "$(stat -c '%Y' "$src_abs" 2>/dev/null || echo -)"
+    # Each stdout line is "<abs>\t<rel>" — key on abs.
+    awk -F'\t' '{print $1}' "$tmp_out" | while IFS= read -r abs; do
+      [[ -n "$abs" ]] || continue
+      printf '%s\t%s\n' "$abs" "$(stat -c '%Y' "$abs" 2>/dev/null || echo -)"
+    done
+  } > "$deps_file"
+  mv "$tmp_out" "$out_file"
+  mv "$tmp_err" "$err_file"
+
+  cat "$out_file"
+  cat "$err_file" >&2
 }
 
 # Which env vars does the Nix gcc-wrapper look for?
