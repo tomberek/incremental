@@ -40,7 +40,11 @@ fi
 
 # Redis has no autoconf; just `cd src && make redis-server`. We reuse
 # mosh-env because it already carries gnumake + pkg-config.
+#
+# SOURCE_DATE_EPOCH pins mkreleasehdr.sh's BUILD_ID (otherwise
+# "<hostname>-<epoch>" gets baked into release.o, defeating CA-caching).
 export REDIS_SRC NIXGG_JOBS
+export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1700000000}"
 INNER_SCRIPT='
 set -euo pipefail
 cd "$REDIS_SRC"
