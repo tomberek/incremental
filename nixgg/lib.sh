@@ -341,6 +341,29 @@ nixgg::stage_sources() {
 #
 # The dep list is (source, all headers). We use `stat -c '%Y'` (mtime,
 # whole-second). Any file added/removed/mtime-advanced → miss.
+# Validate a scan cache entry by its key: batched stat on every path
+# in the .deps file, compare mtimes to the recorded ones. Returns 0
+# (still fresh) or 1 (invalidated).
+nixgg::scan_cache_fresh() {
+  local key="$1"
+  local deps_file="$_NIXGG_SCANS_DIR/$key.deps"
+  [[ -f "$deps_file" ]] || return 1
+  local -a dep_paths=() dep_mtimes=() cur_mtimes=()
+  while IFS=$'\t' read -r p m; do
+    dep_paths+=( "$p" ); dep_mtimes+=( "$m" )
+  done < "$deps_file"
+  (( ${#dep_paths[@]} == 0 )) && return 1
+  mapfile -t cur_mtimes < <(stat -c '%Y' -- "${dep_paths[@]}" 2>/dev/null)
+  while (( ${#cur_mtimes[@]} < ${#dep_paths[@]} )); do
+    cur_mtimes+=( "-" )
+  done
+  local i
+  for ((i = 0; i < ${#dep_paths[@]}; i++)); do
+    [[ "${cur_mtimes[i]}" == "${dep_mtimes[i]}" ]] || return 1
+  done
+  return 0
+}
+
 nixgg::scan_headers_cached() {
   local real_cc="$1" source="$2"; shift 2
   local flags_hash key out_file err_file deps_file
@@ -349,37 +372,14 @@ nixgg::scan_headers_cached() {
   mkdir -p "$_NIXGG_SCANS_DIR"
   key="$_NIXGG_SCANS_DIR/$flags_hash"
   out_file="$key.out"; err_file="$key.err"; deps_file="$key.deps"
+  # Export the computed scan-cache key so the compile driver's argv-
+  # keyed pre-check knows *which* scan cache backs a given tid marker.
+  _NIXGG_SCAN_KEY="$flags_hash"
 
-  if [[ -f "$deps_file" ]]; then
-    # Batch the mtime lookup: one `stat` call for every path in .deps.
-    # `stat -c '%Y'` prints one line per arg in argv order; empty lines
-    # signal "no such file" (from --format on missing paths via ENOENT →
-    # we get an error line on stderr; we use -- and let missing → -.
-    # Simpler: readarray the paths, run stat with the whole list, compare
-    # line-by-line to the .deps mtimes.
-    local -a dep_paths=() dep_mtimes=() cur_mtimes=()
-    while IFS=$'\t' read -r p m; do
-      dep_paths+=( "$p" ); dep_mtimes+=( "$m" )
-    done < "$deps_file"
-    if (( ${#dep_paths[@]} > 0 )); then
-      # `stat` exits nonzero if any path is missing, but still prints
-      # the ones that succeeded. On ENOENT we substitute "-" so the
-      # comparison correctly fails.
-      mapfile -t cur_mtimes < <(stat -c '%Y' -- "${dep_paths[@]}" 2>/dev/null)
-      # Pad cur_mtimes if stat dropped entries.
-      while (( ${#cur_mtimes[@]} < ${#dep_paths[@]} )); do
-        cur_mtimes+=( "-" )
-      done
-    fi
-    local dep_ok=1 i
-    for ((i = 0; i < ${#dep_paths[@]}; i++)); do
-      if [[ "${cur_mtimes[i]}" != "${dep_mtimes[i]}" ]]; then dep_ok=0; break; fi
-    done
-    if (( dep_ok )); then
-      cat "$out_file"
-      cat "$err_file" >&2
-      return 0
-    fi
+  if nixgg::scan_cache_fresh "$flags_hash"; then
+    cat "$out_file"
+    cat "$err_file" >&2
+    return 0
   fi
 
   # Cache miss. Run the scanner, capture both streams, record dep mtimes.

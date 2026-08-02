@@ -119,6 +119,40 @@ if [[ -z "$output" ]]; then
   output="${base%.*}.o"
 fi
 
+# ── Argv-keyed short-circuit ───────────────────────────────────────
+# The fast path for warm rebuilds: hash the whole compile invocation
+# (tool + full argv + output basename), look up whether we've done
+# exactly this compile before. If:
+#   (a) an argv-cache entry exists,
+#   (b) the scan-cache it references is still valid (mtime match on
+#       every source + header), and
+#   (c) the built store path still exists,
+# then we know the output would be byte-identical to what we already
+# built. Skip staging, scan-headers, expression building, and the
+# tid-marker check. Just relink the output and exit.
+#
+# Cost of this fast path: one sha256sum fork, one small file read,
+# one batched stat over the .deps file, one readlink+re-link. ~15ms.
+_argv_hash=$(printf '%s\n%s\n' "$TOOL" "$*" | sha256sum | cut -c1-32)
+_argv_marker="$_NIXGG_THUNKS_DIR/.argv.$_argv_hash"
+if [[ -f "$_argv_marker" ]]; then
+  IFS=$'\t' read -r _cached_tid _cached_built _cached_scan_key < "$_argv_marker" || true
+  if [[ -n "$_cached_built" && -n "$_cached_scan_key" ]] \
+      && nixgg::scan_cache_fresh "$_cached_scan_key"; then
+    _cached_local=$(nixgg::resolve_store_path "$_cached_built")
+    out_basename=$(basename "$output")
+    if [[ -e "$_cached_local/$out_basename" ]]; then
+      nixgg::link_store_to_output "$_cached_built" "$output"
+      nixgg::log "argv-cache hit $source -> $output ($_cached_built)"
+      nixgg::emit "$(jq -cn --arg tool "$TOOL" --arg source "$source" \
+                           --arg output "$output" --arg built "$_cached_built" \
+        '{event: "compile", kind: "argv_cache_hit", tool: $tool,
+          source: $source, output: $output, built: $built}')"
+      exit 0
+    fi
+  fi
+fi
+
 nixgg::log "compile $source -> $output"
 if (( ${#passthrough[@]} )); then
   nixgg::log "  raw flags: [$(printf "'%s' " "${passthrough[@]}")]"
@@ -295,6 +329,10 @@ if [[ "$old_tid" == "$tid" && -n "$old_built" ]]; then
   built_local=$(nixgg::resolve_store_path "$old_built")
   if [[ -e "$built_local/$out_basename" ]]; then
     nixgg::link_store_to_output "$old_built" "$output"
+    # Also refresh the argv-keyed marker so subsequent invocations
+    # can short-circuit before scan-headers/staging even run.
+    printf '%s\t%s\t%s\n' "$tid" "$old_built" "${_NIXGG_SCAN_KEY:-}" \
+      > "$_argv_marker" 2>/dev/null || true
     nixgg::log "  cache hit:  $output -> $old_built"
     nixgg::emit "$(jq -cn --arg tool "$TOOL" --arg source "$source" \
                          --arg output "$output" --arg built "$old_built" \
@@ -313,6 +351,10 @@ nixgg::log "  built:      $built"
 nixgg::link_store_to_output "$built" "$output"
 mkdir -p "$_NIXGG_THUNKS_DIR"
 printf '%s\t%s\n' "$tid" "$built" > "$tid_marker"
+# The argv-keyed marker duplicates the tid+built plus the scan-cache
+# key that stored our header list. Reading these three fields at
+# start of the next shim invocation is all the fast-path needs.
+printf '%s\t%s\t%s\n' "$tid" "$built" "${_NIXGG_SCAN_KEY:-}" > "$_argv_marker"
 
 extras=$(jq -cn --arg tool "$TOOL" --arg source "$source" --arg staged "$staged" \
   '{tool: $tool, source: $source, staged: $staged}')
