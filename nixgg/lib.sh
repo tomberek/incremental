@@ -337,13 +337,18 @@ store = $NIXGG_STORE
 # path → wrap in builtins.storePath) or "nix" (path to another thunk
 # .nix file → import it). Emits:
 #   [ { drv = <expr>; name = "…"; } … ]
+# For `ref_kind == "nix"` inputs, use `import ./<id>.nix` — a relative
+# path that resolves against the thunk file containing the import.
+# All thunks live in the same $NIXGG_THUNKS_DIR, so this keeps thunk
+# content free of the absolute $PWD (which would otherwise churn CA
+# hashes when a project moves).
 nixgg::inputs_nix_from_json() {
   local inputs_json="$1"
   echo "$inputs_json" | jq -r '
     map(
       (if .ref_kind == "store"
          then "builtins.storePath \"" + .ref + "\""
-       else "import " + .ref
+       else "import ./" + (.ref | sub(".*/"; ""))
        end) as $drv
       | "{ drv = " + $drv + "; name = \"" + .name + "\"; }"
     ) | "[ " + join(" ") + " ]"'

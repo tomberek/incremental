@@ -174,8 +174,8 @@ cmd_force() {
       (( $# > 0 )) || return 0
     else
       local referenced tid_file tid first_sym
-      referenced=$(grep -horE '/thunks/[a-f0-9]+\.nix' "$_thunks_dir"/*.nix 2>/dev/null \
-                     | sed 's|^/thunks/||; s|\.nix$||' | sort -u)
+      referenced=$(grep -horE '\./[a-f0-9]+\.nix' "$_thunks_dir"/*.nix 2>/dev/null \
+                     | sed 's|^\./||; s|\.nix$||' | sort -u)
       for tid_file in "$_symlinks_dir"/*; do
         [[ -f "$tid_file" ]] || continue
         tid=$(basename "$tid_file")
@@ -226,22 +226,24 @@ store = $NIXGG_STORE
 
   local symlinks_dir="$_symlinks_dir"
 
-  # Walk the transitive `import …/thunks/<id>.nix` references in a
-  # thunk file. Prints each visited thunk `.nix` absolute path once.
-  # Bash lacks a set, so we use an associative array.
+  # Walk the transitive `import ./<id>.nix` references in a thunk file.
+  # Prints each visited thunk `.nix` absolute path once. Bash lacks a
+  # set, so we use an associative array.
   declare -A _seen=()
   _collect_thunks() {
     local t="$1"
     [[ -n "${_seen[$t]:-}" ]] && return
     _seen["$t"]=1
     printf '%s\n' "$t"
-    # Grep for `import /abs/path/thunks/<id>.nix` references. Every
-    # thunk file uses absolute imports so we can extract them cleanly.
-    local child
-    while IFS= read -r child; do
+    # Thunks import their siblings by relative path (import ./<id>.nix)
+    # so we resolve each against the current thunk's directory.
+    local dir tid_ref child
+    dir=$(dirname "$t")
+    while IFS= read -r tid_ref; do
+      child="$dir/$tid_ref"
       [[ -f "$child" ]] || continue
       _collect_thunks "$child"
-    done < <(grep -oE '/[^ ]+/thunks/[a-f0-9]+\.nix' "$t" 2>/dev/null | sort -u)
+    done < <(grep -oE '\./[a-f0-9]+\.nix' "$t" 2>/dev/null | sort -u | sed 's|^\./||')
   }
 
   # Register a GC root for a store path (used from force promotion).
