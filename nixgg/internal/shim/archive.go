@@ -33,7 +33,7 @@ func Archive(args []string, cfg *toolchain.Config, l paths.Layout) error {
 	altPrefix := altStorePrefix(cfg.Store)
 	arInputs := make([]expr.Input, 0, len(inputs))
 	for _, in := range inputs {
-		c := classify.Target(in, altPrefix)
+		c := classify.Target(in, altPrefix, l)
 		switch c.Kind {
 		case classify.Store:
 			arInputs = append(arInputs, expr.Input{
@@ -72,7 +72,7 @@ func Archive(args []string, cfg *toolchain.Config, l paths.Layout) error {
 	if err != nil {
 		return err
 	}
-	if err := thunk.LinkPlaceholder(archive, thunkPath); err != nil {
+	if err := thunk.LinkPlaceholder(l, archive, thunkPath); err != nil {
 		return err
 	}
 	if err := thunk.RecordSymlink(l, id, archive); err != nil {

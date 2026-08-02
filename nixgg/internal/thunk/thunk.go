@@ -7,11 +7,13 @@
 package thunk
 
 import (
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/tbereknyei/nixgg/internal/paths"
 )
@@ -71,8 +73,11 @@ func Write(l paths.Layout, id ID, expr string) (string, error) {
 }
 
 // LinkPlaceholder replaces `output` with a symlink pointing at the
-// thunk file. Creates the parent dir if missing.
-func LinkPlaceholder(output, thunkPath string) error {
+// thunk file. Creates the parent dir if missing. Also drops any stale
+// entry from the promoted registry — the shim is authoritative about
+// what a file is now, and a re-shim invalidates the last
+// "promoted from store" record for this path.
+func LinkPlaceholder(l paths.Layout, output, thunkPath string) error {
 	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
 		return err
 	}
@@ -82,7 +87,70 @@ func LinkPlaceholder(output, thunkPath string) error {
 	if err := os.Symlink(thunkPath, output); err != nil {
 		return fmt.Errorf("symlink %s -> %s: %w", output, thunkPath, err)
 	}
+	// Drop the promoted registry entry (if any). Any future classify
+	// on `output` will resolve the symlink and see it points at a
+	// thunk file — the correct answer.
+	if abs, err := filepath.Abs(output); err == nil {
+		_ = os.Remove(filepath.Join(l.Promoted, promotedKey(abs)))
+	}
 	return nil
+}
+
+// PromotedInfo records what a caller-visible regular file was
+// produced from: which thunk (so force can re-evaluate) and which
+// store path (so link/ar shims can reference it as builtins.storePath).
+type PromotedInfo struct {
+	ThunkID   ID
+	StorePath string
+}
+
+// RecordPromoted records "target file was produced by realising thunkID
+// which built to storePath". Written by force after promoting a thunk
+// symlink into a real byte-copy.
+//
+// Layout: .nixgg/promoted/<sha1(abs-target)>. Two lines:
+//
+//	<thunk-id>
+//	<store-path>
+//
+// Small enough that we don't bother with a shared index — one file per
+// promoted target, keyed by the target's absolute path hash.
+func RecordPromoted(l paths.Layout, target string, thunkID ID, storePath string) error {
+	if err := os.MkdirAll(l.Promoted, 0o755); err != nil {
+		return err
+	}
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		return err
+	}
+	key := promotedKey(abs)
+	dst := filepath.Join(l.Promoted, key)
+	body := fmt.Sprintf("%s\n%s\n", thunkID, storePath)
+	return os.WriteFile(dst, []byte(body), 0o644)
+}
+
+// LookupPromoted returns the recorded info for a target, or nil.
+func LookupPromoted(l paths.Layout, target string) *PromotedInfo {
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		return nil
+	}
+	body, err := os.ReadFile(filepath.Join(l.Promoted, promotedKey(abs)))
+	if err != nil {
+		return nil
+	}
+	lines := strings.SplitN(strings.TrimSpace(string(body)), "\n", 2)
+	if len(lines) != 2 {
+		return nil
+	}
+	return &PromotedInfo{ThunkID: ID(lines[0]), StorePath: lines[1]}
+}
+
+// promotedKey is sha1 of the abs path — short, filesystem-safe,
+// collision-resistant enough for a local cache.
+func promotedKey(abs string) string {
+	h := sha1.Sum([]byte(abs))
+	return hex.EncodeToString(h[:])
 }
 
 // RecordSymlink appends the caller-visible symlink path to the manifest

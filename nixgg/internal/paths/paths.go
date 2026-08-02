@@ -13,10 +13,11 @@ import (
 // Layout resolves the standard set of cache directories from env.
 // Zero value is invalid; use Resolve.
 type Layout struct {
-	Thunks   string // .nixgg/thunks/
-	Srcs     string // .nixgg/srcs/
-	Scans    string // .nixgg/scans/
-	Symlinks string // .nixgg/symlinks/
+	Thunks    string // .nixgg/thunks/
+	Srcs      string // .nixgg/srcs/
+	Scans     string // .nixgg/scans/
+	Symlinks  string // .nixgg/symlinks/
+	Promoted  string // .nixgg/promoted/ — sha1(abs-path) → store path
 }
 
 // Resolve reads NIXGG_THUNKS_DIR (or defaults to $PWD/.nixgg/thunks) and
@@ -37,6 +38,7 @@ func Resolve() (Layout, error) {
 		Srcs:     envOr("NIXGG_SRCS_DIR", filepath.Join(parent, "srcs")),
 		Scans:    envOr("NIXGG_SCANS_DIR", filepath.Join(parent, "scans")),
 		Symlinks: envOr("NIXGG_SYMLINKS_DIR", filepath.Join(parent, "symlinks")),
+		Promoted: envOr("NIXGG_PROMOTED_DIR", filepath.Join(parent, "promoted")),
 	}, nil
 }
 

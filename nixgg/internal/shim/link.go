@@ -45,7 +45,7 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 	altPrefix := altStorePrefix(cfg.Store)
 	linkInputs := make([]expr.Input, 0, len(inputs))
 	for _, in := range inputs {
-		c := classify.Target(in, altPrefix)
+		c := classify.Target(in, altPrefix, l)
 		switch c.Kind {
 		case classify.Store:
 			linkInputs = append(linkInputs, expr.Input{
@@ -86,7 +86,7 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 	if err != nil {
 		return err
 	}
-	if err := thunk.LinkPlaceholder(output, thunkPath); err != nil {
+	if err := thunk.LinkPlaceholder(l, output, thunkPath); err != nil {
 		return err
 	}
 	if err := thunk.RecordSymlink(l, id, output); err != nil {

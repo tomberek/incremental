@@ -3,14 +3,17 @@ package cli
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/tbereknyei/nixgg/internal/classify"
 	"github.com/tbereknyei/nixgg/internal/paths"
+	"github.com/tbereknyei/nixgg/internal/thunk"
 	"github.com/tbereknyei/nixgg/internal/toolchain"
 )
 
@@ -74,7 +77,7 @@ func cmdForce(args []string) error {
 	altPrefix := altStorePrefix(cfg.Store)
 
 	for _, target := range targets {
-		c := classify.Target(target, altPrefix)
+		c := classify.Target(target, altPrefix, l)
 		switch c.Kind {
 		case classify.Absent:
 			fmt.Fprintf(os.Stderr, "[nixgg force] no target %s\n", target)
@@ -83,6 +86,19 @@ func cmdForce(args []string) error {
 			fmt.Fprintf(os.Stderr, "[nixgg force] %s is not a nixgg symlink\n", target)
 			continue
 		case classify.Store:
+			// The target is a regular file previously promoted from a
+			// thunk. We know which thunk (from the promoted registry)
+			// so we can re-evaluate the DAG rooted there. Nix's eval
+			// cache decides whether anything actually needs rebuilding.
+			if c.ThunkID != "" {
+				thunkPath := filepath.Join(l.Thunks, c.ThunkID+".nix")
+				if _, err := os.Stat(thunkPath); err == nil {
+					if err := realiseAndPromote(l, cfg, thunkPath, target); err != nil {
+						return err
+					}
+					continue
+				}
+			}
 			fmt.Fprintf(os.Stderr, "[nixgg force] %s already realised (%s)\n", target, c.Ref)
 			continue
 		case classify.Thunk:
@@ -139,7 +155,8 @@ func realiseAndPromote(l paths.Layout, cfg *toolchain.Config, thunkPath, target 
 
 	// 4. Promote symlinks.
 	rootStore := storePaths[0]
-	if err := promoteToStore(cfg, rootStore, target); err != nil {
+	rootID := thunk.ID(strings.TrimSuffix(filepath.Base(thunkPath), ".nix"))
+	if err := promoteToStore(cfg, rootID, rootStore, target); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "[nixgg force] %s -> %s\n", target, rootStore)
@@ -147,7 +164,6 @@ func realiseAndPromote(l paths.Layout, cfg *toolchain.Config, thunkPath, target 
 	// Root manifest — extra caller-visible symlinks that reference the
 	// same thunk (e.g. two different make targets that hit the same
 	// content-hash).
-	rootID := strings.TrimSuffix(filepath.Base(thunkPath), ".nix")
 	if err := promoteManifest(l, cfg, rootID, rootStore); err != nil {
 		fmt.Fprintf(os.Stderr, "[nixgg force] %s: %v\n", rootID, err)
 	}
@@ -155,7 +171,7 @@ func realiseAndPromote(l paths.Layout, cfg *toolchain.Config, thunkPath, target 
 	// Child manifests.
 	for i, child := range children {
 		childStore := storePaths[i+1]
-		id := strings.TrimSuffix(filepath.Base(child), ".nix")
+		id := thunk.ID(strings.TrimSuffix(filepath.Base(child), ".nix"))
 		if err := promoteManifest(l, cfg, id, childStore); err != nil {
 			fmt.Fprintf(os.Stderr, "[nixgg force] %s: %v\n", id, err)
 		}
@@ -227,8 +243,15 @@ func writeForceHelper(l paths.Layout, root string, children []string) (string, e
 
 // nixBuildAttrs runs `nix build --file <helper> <attr>...` and returns
 // the printed store paths in the same order as attrs.
+//
+// --refresh: Nix's eval cache would otherwise return the cached
+// derivation for identical thunk file bytes even when the referenced
+// srcTree directory contents have changed. Our thunks reference
+// staging dirs by path literal (`srcTree = ../srcs/…`), and edits to
+// user source files change the srcTree content but not the thunk file
+// itself. --refresh forces Nix to re-hash the referenced paths.
 func nixBuildAttrs(cfg *toolchain.Config, helper string, attrs []string) ([]string, error) {
-	args := []string{"build", "-L", "--no-link", "--print-out-paths", "--file", helper}
+	args := []string{"build", "-L", "--refresh", "--no-link", "--print-out-paths", "--file", helper}
 	args = append(args, attrs...)
 	cmd := exec.Command(cfg.Nix, args...)
 	cmd.Env = append(os.Environ(),
@@ -269,10 +292,14 @@ func findRelativeImports(body []byte) []string {
 	return out
 }
 
-// promoteManifest reads the .nixgg/symlinks/<id> manifest, filters to
-// still-existing symlinks, and re-points each at the store path.
-func promoteManifest(l paths.Layout, cfg *toolchain.Config, id, storePath string) error {
-	manifest := filepath.Join(l.Symlinks, id)
+// promoteManifest reads the .nixgg/symlinks/<id> manifest and promotes
+// every currently-existing caller-visible entry to point at storePath.
+// Entries that no longer point at a thunk symlink (user deleted, make
+// overwrote) are also promoted if the target file is still there; this
+// lets a repeat build with byte-identical inputs re-materialize any
+// files the user cleaned.
+func promoteManifest(l paths.Layout, cfg *toolchain.Config, id thunk.ID, storePath string) error {
+	manifest := filepath.Join(l.Symlinks, string(id))
 	f, err := os.Open(manifest)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -287,11 +314,10 @@ func promoteManifest(l paths.Layout, cfg *toolchain.Config, id, storePath string
 		if sym == "" {
 			continue
 		}
-		info, err := os.Lstat(sym)
-		if err != nil || info.Mode()&os.ModeSymlink == 0 {
-			continue // user deleted or replaced
+		if _, err := os.Lstat(sym); err != nil {
+			continue // user deleted the target
 		}
-		if err := promoteToStore(cfg, storePath, sym); err != nil {
+		if err := promoteToStore(cfg, id, storePath, sym); err != nil {
 			fmt.Fprintf(os.Stderr, "[nixgg force] %s: %v\n", sym, err)
 			continue
 		}
@@ -304,7 +330,23 @@ func promoteManifest(l paths.Layout, cfg *toolchain.Config, id, storePath string
 // The realised derivation always contains a single file whose basename
 // equals the caller-visible symlink's basename (the shim set outName
 // that way), so we can construct the source path directly.
-func promoteToStore(cfg *toolchain.Config, storePath, target string) error {
+//
+// We copy bytes from the store into the working tree (via reflink
+// where possible, else read+write) rather than symlinking, because:
+//
+//  1. Nix pins store-path mtimes to 1969 for reproducibility. If the
+//     caller-visible file is a symlink, make's stat(2) follows it and
+//     sees a 1969 mtime — always older than the .c source, forcing a
+//     full rebuild on every subsequent make invocation. That
+//     completely defeats incremental.
+//
+//  2. Hardlinks avoid the mtime issue but inherit the store's 0444
+//     mode, which breaks tools that expect to overwrite (some ar/ld
+//     variants; the user's `chmod +x` scripts).
+//
+// A copy is 30-100KB per TU, ~5MB across a redis build. Cheap next to
+// the wall-clock savings from correct incremental behavior.
+func promoteToStore(cfg *toolchain.Config, thunkID thunk.ID, storePath, target string) error {
 	src := altStoreOnDisk(cfg.Store, storePath) + "/" + filepath.Base(target)
 	if _, err := os.Stat(src); err != nil {
 		return fmt.Errorf("expected %s to exist: %w", src, err)
@@ -312,8 +354,78 @@ func promoteToStore(cfg *toolchain.Config, storePath, target string) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
 	}
+	if err := copyThroughRename(src, target); err != nil {
+		return err
+	}
+	// Bump mtime so make sees the target as fresh vs. its .c prereqs.
+	now := time.Now()
+	if err := os.Chtimes(target, now, now); err != nil {
+		return err
+	}
+	// Record the target → store mapping so classify can identify it
+	// as a Store-backed regular file when it shows up as an input to
+	// a later link/ar shim invocation.
+	l, err := paths.Resolve()
+	if err != nil {
+		return err
+	}
+	return thunk.RecordPromoted(l, target, thunkID, storePath)
+}
+
+// copyThroughRename copies src → target atomically via a tempfile in
+// the same directory (so rename is on-fs). Removes any pre-existing
+// target (which may be a symlink to a thunk, or a store copy from a
+// prior build).
+func copyThroughRename(src, target string) error {
+	dir := filepath.Dir(target)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(target)+".*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer func() {
+		// If we exit before Rename succeeded, clean up.
+		_ = os.Remove(name)
+	}()
+	sf, err := os.Open(src)
+	if err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := ioCopy(tmp, sf); err != nil {
+		sf.Close()
+		tmp.Close()
+		return err
+	}
+	// Preserve the source's execute bit — a linked binary (like lua)
+	// needs +x; a .o object doesn't. Store paths are 0444 but the
+	// mode's a bit we can copy over regardless.
+	srcInfo, err := sf.Stat()
+	sf.Close()
+	if err != nil {
+		tmp.Close()
+		return err
+	}
+	// Convert 0444 → 0644 (writable owner) so make can `rm` the file
+	// later; preserve x bits from source.
+	mode := (srcInfo.Mode() & 0o111) | 0o644
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	// Remove any pre-existing target (symlink to a thunk, or a stale
+	// copy) so the rename replaces it cleanly.
 	_ = os.Remove(target)
-	return os.Symlink(src, target)
+	return os.Rename(name, target)
+}
+
+// Small wrapper so tests can stub the copy. Delegates to io.Copy from
+// the stdlib.
+func ioCopy(dst io.Writer, src io.Reader) (int64, error) {
+	return io.Copy(dst, src)
 }
 
 // findRootTargets scans thunks/ for .nix files not imported by any

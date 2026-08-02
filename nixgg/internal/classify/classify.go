@@ -15,6 +15,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/tbereknyei/nixgg/internal/paths"
+	"github.com/tbereknyei/nixgg/internal/thunk"
 )
 
 // Kind labels a classification outcome.
@@ -50,13 +53,27 @@ func (k Kind) String() string {
 type Result struct {
 	Kind Kind
 	Ref  string
+	// ThunkID is set when Kind == Store AND we know which thunk file
+	// produced this output (only populated for promoted regular files
+	// today — a real symlink → /nix/store/... doesn't carry that
+	// association). Empty otherwise.
+	ThunkID string
 }
 
-// Target classifies a single path. altStorePrefix is the on-disk root
-// of the alt store (e.g. "/tmp/nixgg-store"), or "" for a system store.
-// We strip it when reporting store paths so the reference is always
-// the canonical /nix/store/... form that Nix expects.
-func Target(path, altStorePrefix string) Result {
+// Target classifies a single path.
+//
+// altStorePrefix is the on-disk root of the alt store (e.g.
+// "/tmp/nixgg-store"), or "" for a system store. We strip it when
+// reporting store paths so the reference is always the canonical
+// /nix/store/... form that Nix expects.
+//
+// l is the paths.Layout — needed to consult the "promoted" registry,
+// which records regular-file targets that came from a store output.
+// Force copies bytes into the working tree (rather than symlinking)
+// so make's mtime dependency check works, but downstream link/ar
+// shims still need to identify the file's store origin. Pass a
+// zero-value Layout to skip the registry check.
+func Target(path, altStorePrefix string, l paths.Layout) Result {
 	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -65,6 +82,12 @@ func Target(path, altStorePrefix string) Result {
 		return Result{Kind: Regular}
 	}
 	if info.Mode()&os.ModeSymlink == 0 {
+		// Regular file on disk. Was it promoted from a store output?
+		if l.Promoted != "" {
+			if info := thunk.LookupPromoted(l, path); info != nil {
+				return Result{Kind: Store, Ref: info.StorePath, ThunkID: string(info.ThunkID)}
+			}
+		}
 		return Result{Kind: Regular}
 	}
 

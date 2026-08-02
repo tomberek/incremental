@@ -135,7 +135,7 @@ func Compile(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.L
 	if err != nil {
 		return err
 	}
-	if err := thunk.LinkPlaceholder(output, thunkPath); err != nil {
+	if err := thunk.LinkPlaceholder(l, output, thunkPath); err != nil {
 		return err
 	}
 	if err := thunk.RecordSymlink(l, id, output); err != nil {
