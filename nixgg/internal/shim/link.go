@@ -220,6 +220,7 @@ func linkSandbox(
 		Tool:        tool.Basename(),
 		Inputs:      inputs,
 		Flags:       flags,
+		StoreDeps:   storeDeps,
 		Placeholder: "/" + expr.OutPlaceholderNix32,
 		ExtraSrcs: []string{
 			baseNameOf(cfg.BashRoot),

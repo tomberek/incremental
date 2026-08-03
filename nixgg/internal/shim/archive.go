@@ -183,6 +183,7 @@ func archiveSandbox(
 		AR:          arRoot,
 		ARFlags:     modifiers,
 		Inputs:      inputs,
+		StoreDeps:   storeDeps,
 		Placeholder: "/" + expr.OutPlaceholderNix32,
 		ExtraSrcs: []string{
 			baseNameOf(cfg.BashRoot),

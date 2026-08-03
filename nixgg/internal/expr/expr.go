@@ -248,6 +248,9 @@ type CompileJSONParams struct {
 	SrcStore    string            // full /nix/store/... path to the staged src tree
 	Source      string            // relative path inside SrcStore, e.g. "src/foo.c"
 	Flags       []string          // compile flags
+	StoreDeps   []string          // full /nix/store/... roots referenced by flags/env — same as
+	                              // native's storeDepsJSON, flattened to colon-separated for the
+	                              // _storeDeps env var (matches builder.nix).
 	Placeholder string            // builtins.placeholder "out" for this drv
 	Srcs        []string          // basenames for inputs.srcs — bash, coreutils, compiler, srcStore
 	Env         map[string]string // extra env (NIX_CFLAGS_COMPILE etc.); merged over defaults
@@ -258,25 +261,45 @@ type CompileJSONParams struct {
 // script is baked directly into args[1] rather than delegated to
 // builder.nix — the sandbox doesn't have eval, so we can't `import`
 // a helper.
+// CompileJSON produces a JSONDrv byte-equivalent to what
+// nix-instantiate would produce from the .nix expression built by
+// Compile() — same env dict, same shell script (env-var indirection
+// via $src/$source/$outName instead of inlined store paths). That
+// equivalence lets sandbox mode share Nix's eval cache with native
+// mode: identical inputs → identical .drv hash → same cached
+// realisation.
 func CompileJSON(p CompileJSONParams) JSONDrv {
 	env := map[string]string{
-		"out":    p.Placeholder,
-		"name":   p.Name,
-		"system": p.System,
+		"out":            p.Placeholder,
+		"name":           p.Name,
+		"system":         p.System,
+		"builder":        p.Bash + "/bin/bash",
+		"src":            p.SrcStore,
+		"source":         p.Source,
+		"outName":        p.OutName,
+		"outputHashAlgo": "sha256",
+		"outputHashMode": "nar",
+		// Native's builder.nix flattens storeDeps into a
+		// colon-separated string via _storeDeps; keep the same
+		// attr shape here. Callers append actual dep paths to
+		// Inputs.Srcs.
+		"_storeDeps": strings.Join(p.StoreDeps, ":"),
 	}
 	for k, v := range p.Env {
 		env[k] = v
 	}
+	// Script mirrors builder.nix. Env-var indirection so drv-hash
+	// matches even if the concrete store paths change (they get
+	// picked up from inputs.srcs at build time via $src).
 	script := fmt.Sprintf(
 		`set -euo pipefail
 export PATH="%s/bin:%s/bin"
 mkdir -p "$out"
-cd "%s"
-"%s" %s -c "%s" -o "$out/%s"
+cd "$src"
+"%s" %s -c "$source" -o "$out/$outName"
 `,
 		p.Coreutils, p.Compiler,
-		p.SrcStore,
-		p.Tool, shellQuoteFlags(p.Flags), p.Source, p.OutName,
+		p.Tool, shellQuoteFlags(p.Flags),
 	)
 	return JSONDrv{
 		Name:    p.Name,
@@ -309,6 +332,7 @@ type LinkJSONParams struct {
 	Tool        string
 	Inputs      []JSONDrvInput // per-input drv or store-path reference
 	Flags       []string
+	StoreDeps   []string          // full /nix/store/... roots referenced; joined into _storeDeps env
 	Placeholder string
 	ExtraSrcs   []string          // additional basenames for inputs.srcs (bash, coreutils, compiler)
 	Env         map[string]string // wrapper env
@@ -338,17 +362,23 @@ type ArchiveJSONParams struct {
 	AR          string // full /nix/store/... path to gnu binutils (for `ar`)
 	ARFlags     string // e.g. "rcs"
 	Inputs      []JSONDrvInput
+	StoreDeps   []string // full /nix/store/... roots; joined into _storeDeps env
 	Placeholder string
 	ExtraSrcs   []string
 	Env         map[string]string
 }
 
-// ArchiveJSON produces a JSONDrv for an ar step.
+// ArchiveJSON produces a JSONDrv for an ar step. Byte-for-byte
+// equivalent to nix-instantiating archiver.nix.
 func ArchiveJSON(p ArchiveJSONParams) JSONDrv {
 	env := map[string]string{
-		"out":    p.Placeholder,
-		"name":   p.Name,
-		"system": p.System,
+		"out":            p.Placeholder,
+		"name":           p.Name,
+		"system":         p.System,
+		"builder":        p.Bash + "/bin/bash",
+		"outputHashAlgo": "sha256",
+		"outputHashMode": "nar",
+		"_storeDeps":     strings.Join(p.StoreDeps, ":"),
 	}
 	for k, v := range p.Env {
 		env[k] = v
@@ -412,12 +442,18 @@ mkdir -p "$out"
 	}
 }
 
-// LinkJSON produces a JSONDrv for a link step.
+// LinkJSON produces a JSONDrv for a link step. Byte-for-byte
+// equivalent to nix-instantiating linker.nix — same env attrs,
+// same script shape — so sandbox mode's drv-hash matches native's.
 func LinkJSON(p LinkJSONParams) JSONDrv {
 	env := map[string]string{
-		"out":    p.Placeholder,
-		"name":   p.Name,
-		"system": p.System,
+		"out":            p.Placeholder,
+		"name":           p.Name,
+		"system":         p.System,
+		"builder":        p.Bash + "/bin/bash",
+		"outputHashAlgo": "sha256",
+		"outputHashMode": "nar",
+		"_storeDeps":     strings.Join(p.StoreDeps, ":"),
 	}
 	for k, v := range p.Env {
 		env[k] = v

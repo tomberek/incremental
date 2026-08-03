@@ -86,13 +86,22 @@ func Compile(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.L
 	}
 	// The tu_id must uniquely identify this compile across the whole
 	// project so cross-directory calls with the same output basename
-	// (e.g. redis src/sds.o vs deps/hiredis/sds.o) don't collide on
-	// the staging dir. Feed TUID the absolute output path.
+	// (redis src/sds.o vs deps/hiredis/sds.o) don't collide on the
+	// staging dir. Feed TUID the output path *relative to the
+	// workspace root* — that captures the project-local ambiguity
+	// without leaking the absolute path prefix into the drv hash.
+	// Absolute prefixes differ between native (user's cwd) and
+	// sandbox (/build/work) mode even for identical source; the
+	// relative path is the same in both.
 	absOut, err := filepath.Abs(output)
 	if err != nil {
 		return err
 	}
-	tuID := stage.TUID(absOut)
+	tuKey := absOut
+	if rel, err := filepath.Rel(scanResult.ProjectRoot, absOut); err == nil && !strings.HasPrefix(rel, "..") {
+		tuKey = rel
+	}
+	tuID := stage.TUID(tuKey)
 	stageRes, err := stage.Sources(l, tuID, entries)
 	if err != nil {
 		return err
@@ -169,8 +178,12 @@ func compileSandbox(
 	tool dispatch.Tool, tuID, outName, output, srcRel string,
 	flags []string, storeDeps []string, wrapperEnvJSON string,
 ) error {
-	// 1. Upload the staged src tree to the store.
-	srcStore, err := sandbox.StoreAddScan(cfg, "src-"+outName, filepath.Join(l.Srcs, tuID))
+	// 1. Upload the staged src tree to the store. Use `tuID` as the
+	// store-path name so this matches what native mode produces when
+	// its .nix thunk gets instantiated — same content, same name,
+	// same store path, same drv hash. See ARCHITECTURE.md on drv
+	// equivalence between modes.
+	srcStore, err := sandbox.StoreAddScan(cfg, tuID, filepath.Join(l.Srcs, tuID))
 	if err != nil {
 		return fmt.Errorf("stage src to store: %w", err)
 	}
@@ -206,6 +219,7 @@ func compileSandbox(
 		SrcStore:    srcStore,
 		Source:      srcRel,
 		Flags:       flags,
+		StoreDeps:   storeDeps,
 		Placeholder: outPlaceholder,
 		Srcs: []string{
 			baseNameOf(bash),
