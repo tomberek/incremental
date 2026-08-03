@@ -241,15 +241,17 @@ func linkSandbox(
 	}
 	logf("  drv:        %s", drvPath)
 
-	// Submit if this matches the caller's declared target. NIXGG_SANDBOX_TARGET
-	// holds the abs or basename path the outer build wants exposed as `out`.
-	// If unset, we submit every link (last-write-wins from Nix's perspective,
-	// which will error on the second submit).
+	// Submit if this matches the caller's declared target.
+	// NIXGG_SANDBOX_TARGET holds the abs or basename path the outer
+	// build wants exposed as `out`. If unset, submit every link
+	// (which will error on the second submit — user should set
+	// TARGET when they have multiple links).
+	//
+	// mkNixggBuild names the outer drv "bin-<target>.drv" to match
+	// our inner link drv's name, so no rename is needed.
 	target := os.Getenv("NIXGG_SANDBOX_TARGET")
 	if target == "" || matchesTarget(target, output) {
 		if err := sandbox.SubmitOutput(cfg, drvPath, "out"); err != nil {
-			// Second-submit error is not fatal on projects that link
-			// helper binaries then the "real" one: emit a warning.
 			logf("  submit-output: %v", err)
 		} else {
 			logf("  submitted: %s", drvPath)

@@ -217,10 +217,14 @@ type JSONDrvInputs struct {
 	Srcs []string `json:"srcs"`
 }
 
-// JSONDrvRef is the value side of an inputs.drvs entry.
+// JSONDrvRef is the value side of an inputs.drvs entry. Nix's
+// derivation-JSON parser requires `dynamicOutputs` to be present
+// (empty is fine); the `omitempty` tag would drop the key when the
+// map is nil and trigger "Expected JSON object to contain key
+// 'dynamicOutputs' but it doesn't".
 type JSONDrvRef struct {
-	Outputs         []string          `json:"outputs"`
-	DynamicOutputs  map[string]any    `json:"dynamicOutputs,omitempty"`
+	Outputs        []string       `json:"outputs"`
+	DynamicOutputs map[string]any `json:"dynamicOutputs"`
 }
 
 // JSONOut describes an output of the derivation.
@@ -350,7 +354,7 @@ func ArchiveJSON(p ArchiveJSONParams) JSONDrv {
 		env[k] = v
 	}
 	drvs := map[string]JSONDrvRef{}
-	srcs := append([]string(nil), p.ExtraSrcs...)
+	srcs := append([]string{}, p.ExtraSrcs...)
 	seen := map[string]bool{}
 	for _, s := range srcs {
 		seen[s] = true
@@ -361,6 +365,9 @@ func ArchiveJSON(p ArchiveJSONParams) JSONDrv {
 		case "drv":
 			ref := drvs[in.Ref]
 			ref.Outputs = appendUnique(ref.Outputs, "out")
+			if ref.DynamicOutputs == nil {
+				ref.DynamicOutputs = map[string]any{}
+			}
 			drvs[in.Ref] = ref
 			ph := caOutputPlaceholder(in.Ref, "out")
 			inputRefs = append(inputRefs, fmt.Sprintf("'%s/%s'", ph, in.Name))
@@ -411,7 +418,7 @@ func LinkJSON(p LinkJSONParams) JSONDrv {
 	}
 
 	drvs := map[string]JSONDrvRef{}
-	srcs := append([]string(nil), p.ExtraSrcs...)
+	srcs := append([]string{}, p.ExtraSrcs...)
 	seenSrc := map[string]bool{}
 	for _, s := range srcs {
 		seenSrc[s] = true
@@ -420,13 +427,24 @@ func LinkJSON(p LinkJSONParams) JSONDrv {
 	for _, in := range p.Inputs {
 		switch in.Kind {
 		case "drv":
-			// Merge outputs if the same drv is referenced multiple times.
-			ref := drvs[in.Ref]
+			// The map key must be a basename (hash+name+.drv), not the
+			// full /nix/store/... path — `nix derivation add` rejects
+			// the leading slash as "illegal base-32 character '/'".
+			// Same rule as inputs.srcs.
+			refKey := in.Ref
+			if i := strings.LastIndexByte(refKey, '/'); i >= 0 {
+				refKey = refKey[i+1:]
+			}
+			ref := drvs[refKey]
 			ref.Outputs = appendUnique(ref.Outputs, "out")
-			drvs[in.Ref] = ref
+			if ref.DynamicOutputs == nil {
+				ref.DynamicOutputs = map[string]any{}
+			}
+			drvs[refKey] = ref
 			// Reference in shell: use the ca-derivation placeholder for
 			// this drv's "out". The placeholder gets substituted with a
-			// real /nix/store/… path at build time.
+			// real /nix/store/… path at build time. caOutputPlaceholder
+			// still needs the full path so it can compute a hashPart.
 			ph := caOutputPlaceholder(in.Ref, "out")
 			inputRefs = append(inputRefs, fmt.Sprintf("'%s/%s'", ph, in.Name))
 		case "src":

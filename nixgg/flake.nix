@@ -124,6 +124,47 @@
             dontUnpack = true;
             installPhase = "mkdir -p $out";
           };
+
+          # The nixgg Go binary + shims tree, built from THIS repo's
+          # source. `mkNixggBuild` (below) pulls this in as a build
+          # input so the sandboxed builder can invoke shims.
+          #
+          # Static (netgo + osusergo) so it works regardless of what
+          # the sandbox mounts.
+          nixggBin = pkgs.buildGoModule {
+            pname = "nixgg";
+            version = "0";
+            src = builtins.path {
+              name = "nixgg-src";
+              path = ./.;
+              # Skip generated / scratch dirs.
+              filter = path: type:
+                let base = baseNameOf path; in
+                base != "bin" && base != "dyn-drv"
+                && !(pkgs.lib.hasPrefix "." base)
+                && base != "shims";
+            };
+            vendorHash = null;  # no deps
+            doCheck = false;
+            postInstall = ''
+              mkdir -p $out/shims
+              for t in ar c++ cc g++ gcc ranlib; do
+                ln -s ../bin/nixgg $out/shims/$t
+              done
+            '';
+          };
+
+          # mkNixggBuild wraps a user command in a builder-rpc-v0
+          # derivation whose output IS a .drv file — the "final link"
+          # drv submitted from inside the sandbox. Consumers get the
+          # compiled artifact via `builtins.outputOf drv.outPath "out"`.
+          mkNixggBuild = import ./nix/mkNixggBuild.nix {
+            inherit (pkgs) lib coreutils gnumake bash;
+            gcc         = toolchain.gcc;
+            nixgg       = nixggBin;
+            nixHelpers  = nixHelpers;
+            patchedNix  = patchedNix;
+          };
         in
         toolchain
         // {
@@ -132,6 +173,12 @@
           mosh-env = moshEnv;
           fmt-env = fmtEnv;
           patched-nix = patchedNix;
+          nixgg-bin = nixggBin;
+          # mkNixggBuild is a function, not a derivation; expose it via
+          # a passthru attribute so consumers can `nixgg-hello =
+          # (self.packages.<system>.mkNixggBuild) { … };` in their
+          # flake.nix.
+          inherit mkNixggBuild;
           default = envShell;
         }
       );
