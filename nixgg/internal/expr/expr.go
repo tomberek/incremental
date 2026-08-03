@@ -363,12 +363,18 @@ func ArchiveJSON(p ArchiveJSONParams) JSONDrv {
 	for _, in := range p.Inputs {
 		switch in.Kind {
 		case "drv":
-			ref := drvs[in.Ref]
+			// Map keys must be basenames — same rule as inputs.srcs.
+			// See LinkJSON for the equivalent code.
+			refKey := in.Ref
+			if i := strings.LastIndexByte(refKey, '/'); i >= 0 {
+				refKey = refKey[i+1:]
+			}
+			ref := drvs[refKey]
 			ref.Outputs = appendUnique(ref.Outputs, "out")
 			if ref.DynamicOutputs == nil {
 				ref.DynamicOutputs = map[string]any{}
 			}
-			drvs[in.Ref] = ref
+			drvs[refKey] = ref
 			ph := caOutputPlaceholder(in.Ref, "out")
 			inputRefs = append(inputRefs, fmt.Sprintf("'%s/%s'", ph, in.Name))
 		case "src":

@@ -103,16 +103,18 @@ let
   outputHashMode = "text";
   outputHashAlgo = "sha256";
 
+  # nix-ninja's mkMesonPackage trick: stdenv would complain about an
+  # unset $out; a "/nonexistent" placeholder keeps it happy while
+  # making any actual attempt to use $out fail visibly.
+  out = "/nonexistent";
+
   args = [
     "-c"
     ''
       set -euo pipefail
-      # Inside builder-rpc-v0, $out is intentionally unset. Anything
-      # that stringifies it will fail; be paranoid.
-      if [[ -n "''${out+set}" ]]; then
-        echo "mkNixggBuild: expected \$out unset in builder-rpc-v0" >&2
-        exit 1
-      fi
+      # $out is set to /nonexistent (see mkNixggBuild.nix comment
+      # above). If someone actually starts writing there, they'll
+      # get a clear "no such file" — that's the intent.
 
       # Stage the source into a working dir. `src` is added to
       # inputs.srcs by string-context — see PATH above; we cp it
