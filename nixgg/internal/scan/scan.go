@@ -157,11 +157,19 @@ func runScanner(cc, source string, flags []string) (*Result, []depEntry, error) 
 	// -idirafter, -include.
 	includeDirs := extractIncludeDirs(flags)
 
-	// The project root is the common ancestor of cwd + every non-store
-	// include dir. We'll widen it later once we know the header set —
-	// -MG lets gcc report missing headers (like generated .pb.h) as
-	// bare names we can still stage.
-	userDirs := []string{cwd}
+	// The project root is the common ancestor of cwd + the source
+	// dir + every non-store include dir. Include the source dir
+	// up-front so cmake-style out-of-tree builds — `cc -c ../src/x.cc`
+	// from a `build/` directory — get a projectRoot that contains
+	// the source. Without this, `filepath.Rel(cwd, srcAbs)` returns
+	// `../src/x.cc`, which then stages the file *outside* the tuID
+	// dir and produces a broken thunk that references a path with
+	// `..` in it. We widen for headers later too.
+	srcAbs, err := filepath.Abs(source)
+	if err != nil {
+		return nil, nil, err
+	}
+	userDirs := []string{cwd, filepath.Dir(srcAbs)}
 	storeDirs := []string{}
 	for _, d := range includeDirs {
 		abs := d
@@ -197,11 +205,6 @@ func runScanner(cc, source string, flags []string) (*Result, []depEntry, error) 
 
 	// Resolve each token: absolute path, or search cwd + user -I dirs.
 	// Widen projectRoot to cover any dep found outside its current span.
-	srcAbs, err := filepath.Abs(source)
-	if err != nil {
-		return nil, nil, err
-	}
-
 	var resolved []string
 	for _, tok := range tokens {
 		if tok == filepath.Base(source) || tok == source {
