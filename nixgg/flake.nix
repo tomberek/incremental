@@ -218,29 +218,53 @@
           # Shell that has `nixgg` on PATH plus the shims/ dir prefixed
           # ahead of the toolchain — so `cc foo.c -o foo` picks up
           # nixgg's shim, not the raw compiler.
+          #
+          # We deliberately don't put `gcc` in packages: pulling in
+          # the cc-wrapper's setup hook injects NIX_CFLAGS_COMPILE /
+          # NIX_LDFLAGS with -frandom-seed and workspace-relative
+          # -rpath /…/outputs/out/lib, which would end up in every
+          # thunk's wrapperEnv and (a) break CA hash stability across
+          # shell entries because -frandom-seed is per-invocation,
+          # (b) point at a path that doesn't exist. The nixgg shim
+          # resolves the real compiler via NIXGG_COMPILER_ROOT
+          # instead — no wrapper env needed.
           nixggShell = pkgs.mkShellNoCC {
             name = "nixgg-shell";
-            packages = with pkgs; [
+            packages = [
               pkgs'.nixgg-bin
-              gcc
-              gnumake
-              coreutils
-              bash
+              pkgs.gnumake
+              pkgs.coreutils
+              pkgs.bash
             ];
             shellHook = ''
               # Source the pinned NIXGG_* env plus PATH prefix.
-              # env-shell is the same block `nixgg env` prints; sourcing
-              # it directly avoids a fork-and-eval per shell entry.
+              # env-shell is the same block `nixgg env` prints;
+              # sourcing it directly avoids a fork-and-eval per shell
+              # entry.
               . ${pkgs'.env-shell}
 
-              # Alt store default (env-shell doesn't set this — it's a
-              # per-user preference). Overridable.
+              # Alt store default (env-shell doesn't set this — it's
+              # a per-user preference). Overridable.
               : "''${NIXGG_STORE:=local?root=/tmp/nixgg-store}"
               export NIXGG_STORE
 
+              # Belt-and-braces: even without gcc in packages, some
+              # setup hooks leak NIX_CFLAGS_COMPILE / NIX_LDFLAGS
+              # with a -frandom-seed and an rpath pointing at
+              # $out/lib (mkShellNoCC still tries to synthesise an
+              # $out for its own installPhase). Wipe them so
+              # wrapperenv doesn't bake per-shell-entry noise into
+              # every thunk. The shim's derivations run under Nix's
+              # own gcc-wrapper anyway; anything a caller actually
+              # needs to set should go into a project-local shellHook.
+              unset NIX_CFLAGS_COMPILE NIX_CFLAGS_LINK NIX_LDFLAGS
+              unset NIX_CFLAGS_COMPILE_x86_64_unknown_linux_gnu \
+                    NIX_CFLAGS_LINK_x86_64_unknown_linux_gnu \
+                    NIX_LDFLAGS_x86_64_unknown_linux_gnu
+
               # Prepend shims/ so `cc`, `c++`, `ar` etc. dispatch to
-              # the nixgg shim binary (busybox-style symlinks). bin/
-              # first so `nixgg` itself is on PATH too.
+              # the nixgg shim binary. bin/ first so `nixgg` itself
+              # is also on PATH.
               export PATH="${pkgs'.nixgg-bin}/bin:${pkgs'.nixgg-bin}/shims:$PATH"
 
               # Opinionated default: link shim inline-realises, so
