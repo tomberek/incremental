@@ -256,66 +256,26 @@ type CompileJSONParams struct {
 	Env         map[string]string // extra env (NIX_CFLAGS_COMPILE etc.); merged over defaults
 }
 
-// CompileJSON produces a JSONDrv equivalent to the .nix expression
-// that builder.nix would generate for the same inputs. The shell
-// script is baked directly into args[1] rather than delegated to
-// builder.nix — the sandbox doesn't have eval, so we can't `import`
-// a helper.
-// CompileJSON produces a JSONDrv byte-equivalent to what
-// nix-instantiate would produce from the .nix expression built by
-// Compile() — same env dict, same shell script (env-var indirection
-// via $src/$source/$outName instead of inlined store paths). That
-// equivalence lets sandbox mode share Nix's eval cache with native
-// mode: identical inputs → identical .drv hash → same cached
-// realisation.
+// CompileJSON produces a JSONDrv for one compile TU. Delegates to
+// Derivation for the env/script shape so this stays in lockstep with
+// the native `.nix` emitter — see derivation.go.
 func CompileJSON(p CompileJSONParams) JSONDrv {
-	env := map[string]string{
-		"out":            p.Placeholder,
-		"name":           p.Name,
-		"system":         p.System,
-		"builder":        p.Bash + "/bin/bash",
-		"src":            p.SrcStore,
-		"source":         p.Source,
-		"outName":        p.OutName,
-		"outputHashAlgo": "sha256",
-		"outputHashMode": "nar",
-		// Native's builder.nix flattens storeDeps into a
-		// colon-separated string via _storeDeps; keep the same
-		// attr shape here. Callers append actual dep paths to
-		// Inputs.Srcs.
-		"_storeDeps": strings.Join(p.StoreDeps, ":"),
+	d := &Derivation{
+		Kind:       KindCompile,
+		Name:       p.Name,
+		System:     p.System,
+		Bash:       p.Bash,
+		Coreutils:  p.Coreutils,
+		Compiler:   p.Compiler,
+		Tool:       p.Tool,
+		SrcStore:   p.SrcStore,
+		Source:     p.Source,
+		OutName:    p.OutName,
+		Flags:      p.Flags,
+		StoreDeps:  p.StoreDeps,
+		WrapperEnv: p.Env,
 	}
-	for k, v := range p.Env {
-		env[k] = v
-	}
-	// Script mirrors builder.nix. Env-var indirection so drv-hash
-	// matches even if the concrete store paths change (they get
-	// picked up from inputs.srcs at build time via $src).
-	script := fmt.Sprintf(
-		`set -euo pipefail
-export PATH="%s/bin:%s/bin"
-mkdir -p "$out"
-cd "$src"
-"%s" %s -c "$source" -o "$out/$outName"
-`,
-		p.Coreutils, p.Compiler,
-		p.Tool, shellQuoteFlags(p.Flags),
-	)
-	return JSONDrv{
-		Name:    p.Name,
-		System:  p.System,
-		Builder: p.Bash + "/bin/bash",
-		Args:    []string{"-c", script},
-		Env:     env,
-		Inputs: JSONDrvInputs{
-			Drvs: map[string]JSONDrvRef{},
-			Srcs: p.Srcs,
-		},
-		Outputs: map[string]JSONOut{
-			"out": {Method: "nar", HashAlgo: "sha256"},
-		},
-		Version: 4,
-	}
+	return d.toJSON(p.Srcs, nil)
 }
 
 // LinkJSONParams is the sandbox-mode analog of LinkParams. Inputs
@@ -368,166 +328,67 @@ type ArchiveJSONParams struct {
 	Env         map[string]string
 }
 
-// ArchiveJSON produces a JSONDrv for an ar step. Byte-for-byte
-// equivalent to nix-instantiating archiver.nix.
+// ArchiveJSON produces a JSONDrv for an ar step. Delegates to
+// Derivation for env/script shape.
 func ArchiveJSON(p ArchiveJSONParams) JSONDrv {
-	env := map[string]string{
-		"out":            p.Placeholder,
-		"name":           p.Name,
-		"system":         p.System,
-		"builder":        p.Bash + "/bin/bash",
-		"outputHashAlgo": "sha256",
-		"outputHashMode": "nar",
-		"_storeDeps":     strings.Join(p.StoreDeps, ":"),
+	d := &Derivation{
+		Kind:       KindArchive,
+		Name:       p.Name,
+		System:     p.System,
+		Bash:       p.Bash,
+		Coreutils:  p.Coreutils,
+		AR:         p.AR,
+		OutName:    p.OutName,
+		ARFlags:    p.ARFlags,
+		Inputs:     inputsFromJSON(p.Inputs),
+		StoreDeps:  p.StoreDeps,
+		WrapperEnv: p.Env,
 	}
-	for k, v := range p.Env {
-		env[k] = v
-	}
-	drvs := map[string]JSONDrvRef{}
-	srcs := append([]string{}, p.ExtraSrcs...)
-	seen := map[string]bool{}
-	for _, s := range srcs {
-		seen[s] = true
-	}
-	inputRefs := make([]string, 0, len(p.Inputs))
-	for _, in := range p.Inputs {
-		switch in.Kind {
-		case "drv":
-			// Map keys must be basenames — same rule as inputs.srcs.
-			// See LinkJSON for the equivalent code.
-			refKey := in.Ref
-			if i := strings.LastIndexByte(refKey, '/'); i >= 0 {
-				refKey = refKey[i+1:]
-			}
-			ref := drvs[refKey]
-			ref.Outputs = appendUnique(ref.Outputs, "out")
-			if ref.DynamicOutputs == nil {
-				ref.DynamicOutputs = map[string]any{}
-			}
-			drvs[refKey] = ref
-			ph := caOutputPlaceholder(in.Ref, "out")
-			inputRefs = append(inputRefs, fmt.Sprintf("'%s/%s'", ph, in.Name))
-		case "src":
-			if !seen[in.Ref] {
-				srcs = append(srcs, in.Ref)
-				seen[in.Ref] = true
-			}
-			inputRefs = append(inputRefs, fmt.Sprintf("'/nix/store/%s/%s'", in.Ref, in.Name))
-		}
-	}
-	script := fmt.Sprintf(
-		`set -euo pipefail
-export PATH="%s/bin:%s/bin"
-mkdir -p "$out"
-"%s/bin/ar" '%s' "$out/%s" %s
-`,
-		p.Coreutils, p.AR,
-		p.AR, p.ARFlags, p.OutName,
-		strings.Join(inputRefs, " "),
-	)
-	return JSONDrv{
-		Name:    p.Name,
-		System:  p.System,
-		Builder: p.Bash + "/bin/bash",
-		Args:    []string{"-c", script},
-		Env:     env,
-		Inputs: JSONDrvInputs{
-			Drvs: drvs,
-			Srcs: srcs,
-		},
-		Outputs: map[string]JSONOut{
-			"out": {Method: "nar", HashAlgo: "sha256"},
-		},
-		Version: 4,
-	}
+	return d.toJSON(p.ExtraSrcs, nil)
 }
 
-// LinkJSON produces a JSONDrv for a link step. Byte-for-byte
-// equivalent to nix-instantiating linker.nix — same env attrs,
-// same script shape — so sandbox mode's drv-hash matches native's.
+// LinkJSON produces a JSONDrv for a link step. Delegates to
+// Derivation for env/script shape.
 func LinkJSON(p LinkJSONParams) JSONDrv {
-	env := map[string]string{
-		"out":            p.Placeholder,
-		"name":           p.Name,
-		"system":         p.System,
-		"builder":        p.Bash + "/bin/bash",
-		"outputHashAlgo": "sha256",
-		"outputHashMode": "nar",
-		"_storeDeps":     strings.Join(p.StoreDeps, ":"),
+	d := &Derivation{
+		Kind:       KindLink,
+		Name:       p.Name,
+		System:     p.System,
+		Bash:       p.Bash,
+		Coreutils:  p.Coreutils,
+		Compiler:   p.Compiler,
+		Tool:       p.Tool,
+		OutName:    p.OutName,
+		Inputs:     inputsFromJSON(p.Inputs),
+		Flags:      p.Flags,
+		StoreDeps:  p.StoreDeps,
+		WrapperEnv: p.Env,
 	}
-	for k, v := range p.Env {
-		env[k] = v
-	}
+	return d.toJSON(p.ExtraSrcs, nil)
+}
 
-	drvs := map[string]JSONDrvRef{}
-	srcs := append([]string{}, p.ExtraSrcs...)
-	seenSrc := map[string]bool{}
-	for _, s := range srcs {
-		seenSrc[s] = true
-	}
-	inputRefs := make([]string, 0, len(p.Inputs))
-	for _, in := range p.Inputs {
-		switch in.Kind {
-		case "drv":
-			// The map key must be a basename (hash+name+.drv), not the
-			// full /nix/store/... path — `nix derivation add` rejects
-			// the leading slash as "illegal base-32 character '/'".
-			// Same rule as inputs.srcs.
-			refKey := in.Ref
-			if i := strings.LastIndexByte(refKey, '/'); i >= 0 {
-				refKey = refKey[i+1:]
-			}
-			ref := drvs[refKey]
-			ref.Outputs = appendUnique(ref.Outputs, "out")
-			if ref.DynamicOutputs == nil {
-				ref.DynamicOutputs = map[string]any{}
-			}
-			drvs[refKey] = ref
-			// Reference in shell: use the ca-derivation placeholder for
-			// this drv's "out". The placeholder gets substituted with a
-			// real /nix/store/… path at build time. caOutputPlaceholder
-			// still needs the full path so it can compute a hashPart.
-			ph := caOutputPlaceholder(in.Ref, "out")
-			inputRefs = append(inputRefs, fmt.Sprintf("'%s/%s'", ph, in.Name))
-		case "src":
-			if !seenSrc[in.Ref] {
-				srcs = append(srcs, in.Ref)
-				seenSrc[in.Ref] = true
-			}
-			// storeBase looks like "abc123-name"; the full path
-			// interpolates from the sandbox mount.
-			inputRefs = append(inputRefs, fmt.Sprintf("'/nix/store/%s/%s'", in.Ref, in.Name))
-		default:
-			inputRefs = append(inputRefs, fmt.Sprintf("'/* unknown ref kind: %s */'", in.Kind))
+// inputsFromJSON translates the shim-facing JSONDrvInput type
+// ("drv"/"src") into Derivation's internal Input type ("nix"/"store").
+// Same semantics; two names for historical reasons.
+func inputsFromJSON(xs []JSONDrvInput) []derivInput {
+	out := make([]derivInput, len(xs))
+	for i, in := range xs {
+		kind := in.Kind
+		if kind == "drv" {
+			kind = "nix"
+		} else if kind == "src" {
+			kind = "store"
 		}
+		// For store inputs, LinkJSON was previously formatting
+		// '/nix/store/%s/%s' from a basename; keep that behavior by
+		// making Ref look like a canonical path.
+		ref := in.Ref
+		if kind == "store" && !strings.HasPrefix(ref, "/nix/store/") {
+			ref = "/nix/store/" + ref
+		}
+		out[i] = derivInput{InputKind: kind, Ref: ref, Name: in.Name}
 	}
-	script := fmt.Sprintf(
-		`set -euo pipefail
-export PATH="%s/bin:%s/bin"
-mkdir -p "$out"
-"%s" %s %s -o "$out/%s"
-`,
-		p.Coreutils, p.Compiler,
-		p.Tool,
-		shellQuoteFlags(p.Flags),
-		strings.Join(inputRefs, " "),
-		p.OutName,
-	)
-	return JSONDrv{
-		Name:    p.Name,
-		System:  p.System,
-		Builder: p.Bash + "/bin/bash",
-		Args:    []string{"-c", script},
-		Env:     env,
-		Inputs: JSONDrvInputs{
-			Drvs: drvs,
-			Srcs: srcs,
-		},
-		Outputs: map[string]JSONOut{
-			"out": {Method: "nar", HashAlgo: "sha256"},
-		},
-		Version: 4,
-	}
+	return out
 }
 
 // caOutputPlaceholder returns the `/<nix32-hash>` downstream

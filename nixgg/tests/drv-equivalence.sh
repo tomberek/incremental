@@ -59,7 +59,12 @@ fi
 # ---------- 2. sandbox build via .#hello ----------
 printf '==> sandbox: nix build .#hello\n'
 "$PATCHED_NIX/bin/nix" build --no-eval-cache --no-link \
-  --print-out-paths "$nixgg_root#hello" >/dev/null 2>&1
+  --print-out-paths "$nixgg_root#hello" \
+  > /tmp/nixgg-equiv-sandbox.log 2>&1 || {
+    echo "sandbox build failed; see /tmp/nixgg-equiv-sandbox.log:" >&2
+    tail -20 /tmp/nixgg-equiv-sandbox.log >&2
+    exit 4
+  }
 
 # Strip the alt-store prefix so the reported paths match native's
 # canonical `/nix/store/…` form — the CA hash is what matters, not
