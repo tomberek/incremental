@@ -21,9 +21,8 @@ if [[ ! -d "$LUA_SRC" ]]; then
 fi
 
 eval "$("$here/bin/nixgg" env)"
-export NIXGG_THUNKS_DIR="$LUA_SRC/.nixgg/thunks"
 
-# `linux` recurses into `make ... SYSCFLAGS=… all`, which is where the
-# actual compile shims fire. --target lua/luac names the final binaries.
+# NIXGG_AUTOFORCE=1 tells the link shim to realise inline, so plain
+# `make` produces real binaries — no `nixgg build` wrapper needed.
 cd "$LUA_SRC/src"
-exec nixgg build --target lua --target luac -- make -j"$NIXGG_JOBS" linux
+exec env NIXGG_AUTOFORCE=1 make -j"$NIXGG_JOBS" linux

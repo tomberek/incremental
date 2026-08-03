@@ -10,6 +10,7 @@ import (
 	"github.com/tbereknyei/nixgg/internal/dispatch"
 	"github.com/tbereknyei/nixgg/internal/expr"
 	"github.com/tbereknyei/nixgg/internal/paths"
+	"github.com/tbereknyei/nixgg/internal/realise"
 	"github.com/tbereknyei/nixgg/internal/storedeps"
 	"github.com/tbereknyei/nixgg/internal/thunk"
 	"github.com/tbereknyei/nixgg/internal/toolchain"
@@ -77,10 +78,9 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 		WrapperEnvJSON: wrapperEnvJSON,
 	})
 
-	// Links are always placeholder-mode: the resulting binary isn't
-	// usually consumed inside the same make invocation, so there's no
-	// value in synchronous realisation. `nixgg force <target>` does
-	// it at the end.
+	// Links are placeholder-mode by default: the resulting binary isn't
+	// usually consumed inside the same make invocation. `nixgg force
+	// <target>` — or `nixgg build --target …` — realises at the end.
 	id := thunk.Compute(e)
 	thunkPath, err := thunk.Write(l, id, e)
 	if err != nil {
@@ -93,6 +93,18 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 		return err
 	}
 	logf("  thunk:      %s", thunkPath)
+
+	// NIXGG_AUTOFORCE=1: realise the link's DAG inline, so a plain
+	// `NIXGG_AUTOFORCE=1 make` produces real binaries in the working
+	// tree without a wrapper (`nixgg build …`). Only the link shim
+	// does this; compile/archive shims stay placeholder so we don't
+	// force intermediate .o/.a files that are just going to be linked
+	// into something else on the next line.
+	if os.Getenv("NIXGG_AUTOFORCE") == "1" {
+		if err := realise.Realise(l, cfg, thunkPath, output); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

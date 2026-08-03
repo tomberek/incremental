@@ -33,23 +33,22 @@ fi
 # Redis's Makefile doesn't require pkg-config on our config (MALLOC=libc,
 # no TLS). Plain `nixgg env` gives us gcc + make; that's enough.
 eval "$("$here/bin/nixgg" env)"
-export NIXGG_THUNKS_DIR="$REDIS_SRC/.nixgg/thunks"
 export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1700000000}"
+export NIXGG_AUTOFORCE=1
 
 cd "$REDIS_SRC"
 
 # Fresh-clone seed: initialise redis's settings-tracking file so make
 # doesn't auto-trigger persist-settings (distclean) on every build.
 if [[ ! -f src/.make-prerequisites ]]; then
-  NIXGG_MODE=placeholder nixgg run -- \
-    make -C src -j"$NIXGG_JOBS" MALLOC=libc persist-settings
+  make -C src -j"$NIXGG_JOBS" MALLOC=libc persist-settings
 fi
 
-# Deps and src in one placeholder-mode scope; force at end via `build`.
-NIXGG_MODE=placeholder nixgg run -- \
-  make -C deps -j"$NIXGG_JOBS" \
-    hiredis linenoise lua hdr_histogram fpconv xxhash tre
+# Deps first (intermediate .a archives — link shim doesn't fire, so
+# they stay as placeholder thunks that redis-server's link consumes).
+make -C deps -j"$NIXGG_JOBS" \
+  hiredis linenoise lua hdr_histogram fpconv xxhash tre
 
+# Final link: shim sees the -o redis-server and realises the whole DAG.
 cd src
-exec nixgg build --target redis-server -- \
-  make MALLOC=libc -j"$NIXGG_JOBS" redis-server
+exec make MALLOC=libc -j"$NIXGG_JOBS" redis-server

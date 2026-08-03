@@ -38,15 +38,18 @@ exec "$BOOTSTRAP_NIX" develop "$here#mosh-env" --command bash -c '
   set +a
   export PATH="'"$here"'/bin:'"$here"'/shims:$PATH"
   export NIXGG_ROOT="'"$here"'"
-  export NIXGG_THUNKS_DIR="'"$MOSH_SRC"'/.nixgg/thunks"
   export CC=cc CXX=c++
 
   cd "'"$MOSH_SRC"'"
   [[ -x configure ]] || ./autogen.sh 2>/dev/null || true
-  [[ -f Makefile  ]] || nixgg run -- ./configure --disable-hardening
 
-  nixgg build \
-    --target src/frontend/mosh-client \
-    --target src/frontend/mosh-server \
-    -- make -j'"$NIXGG_JOBS"'
+  # Configure runs autoconf conftests, which compile + immediately exec
+  # small test programs. Compile shim recognises conftest* filenames
+  # and realises those TUs synchronously (see mode.For), so autoconf
+  # sees real .o files. Not placeholder-mode.
+  [[ -f Makefile ]] || ./configure --disable-hardening
+
+  # Build: placeholder compile/archive, link shim auto-forces.
+  export NIXGG_AUTOFORCE=1
+  make -j'"$NIXGG_JOBS"'
 '

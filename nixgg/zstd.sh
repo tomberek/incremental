@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
-# Build zstd's static library through nixgg. Plain Makefile project,
-# no autoconf; the env from `nixgg env` is sufficient.
+# Build zstd (the CLI binary) through nixgg. Plain Makefile project —
+# no autoconf, no cmake — so `eval $(nixgg env)` is enough.
+#
+# Zstd is a good cross-directory test: the `zstd` binary links .o files
+# from three subtrees (lib/, programs/, programs/lib/common) all via
+# recursive make. Every shim in that tree must land in one thunks dir
+# so the link thunk's `import ./<id>.nix` references resolve.
+#
+# The Makefile also parameterises the build dir on a hash of the flags
+# (obj/conf_<hash>/zstd), so we ask `make -n` where it'll write and
+# force whatever file it names.
 #
 # Env knobs:
 #   ZSTD_SRC    existing checkout (default: /tmp/zstd-nixgg)
@@ -18,14 +27,9 @@ if [[ ! -d "$ZSTD_SRC" ]]; then
 fi
 
 eval "$("$here/bin/nixgg" env)"
-export NIXGG_THUNKS_DIR="$ZSTD_SRC/.nixgg/thunks"
 
-# Zstd's Makefile parameterises the build dir on a hash of the flags,
-# so the archive lands at obj/conf_<hash>/static/libzstd.a. Rather than
-# recomputing that hash, ask `make -n` where it'll build and force
-# whatever file it names.
-cd "$ZSTD_SRC/lib"
-archive=$(make -n libzstd.a 2>/dev/null \
-  | awk '/^ar/ { for (i=1;i<=NF;i++) if ($i ~ /libzstd\.a$/) { print $i; exit } }')
-[[ -n "$archive" ]] || archive="libzstd.a"
-exec nixgg build --target "$archive" -- make -j"$NIXGG_JOBS" libzstd.a
+# NIXGG_AUTOFORCE=1: link shim realises each binary inline, so plain
+# `make` produces real ELFs in the working tree. `nixgg build` /
+# `nixgg force` are unneeded on projects like this.
+cd "$ZSTD_SRC/programs"
+exec env NIXGG_AUTOFORCE=1 make -j"$NIXGG_JOBS" zstd

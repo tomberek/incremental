@@ -97,9 +97,11 @@ type Input struct {
 	// or "nix" for unrealised sibling thunks (rendered as an `import`).
 	Kind string
 	// Ref is either a /nix/store/… root (Kind=store) or an absolute
-	// path to a sibling thunk .nix file (Kind=nix). We render "nix"
-	// refs as `import ./<basename>` so the thunk file's byte-content
-	// stays cwd-independent.
+	// path to a sibling thunk .nix file (Kind=nix). Absolute paths let
+	// the thunk file survive `cp`: Makefile steps that copy a thunk
+	// symlink to a peer location (e.g. `cp obj/foo.o dest/foo.o`)
+	// dereference the symlink and produce a regular file with the same
+	// bytes. Absolute imports still resolve; relative ones wouldn't.
 	Ref string
 	// Name is the basename that will appear inside the derivation
 	// output — same as the caller-visible symlink's basename.
@@ -120,14 +122,9 @@ func InputsList(inputs []Input) string {
 		case "store":
 			drv = fmt.Sprintf("builtins.storePath %q", in.Ref)
 		case "nix":
-			// Relativize: sibling thunks live in the same dir as this
-			// thunk, so `import ./<id>.nix` resolves correctly and the
-			// content is cwd-independent.
-			base := in.Ref
-			if i := strings.LastIndexByte(base, '/'); i >= 0 {
-				base = base[i+1:]
-			}
-			drv = "import ./" + base
+			// Absolute Nix path literal (unquoted): survives `cp` of the
+			// containing thunk to a peer directory. See Input.Ref docstring.
+			drv = "import " + in.Ref
 		default:
 			// Shouldn't happen; be visible if it does.
 			drv = fmt.Sprintf("/* unknown ref_kind: %s */ null", in.Kind)

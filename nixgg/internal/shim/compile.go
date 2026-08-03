@@ -109,9 +109,10 @@ func Compile(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.L
 	}
 	storeDeps := storedeps.From(sandboxFlags, wrapperEnvJSON)
 
-	// srcTree is a Nix path literal referring to the staging dir,
-	// relative to the thunks dir (both live under .nixgg/).
-	srcTreeLiteral := "../" + filepath.Base(l.Srcs) + "/" + tuID
+	// srcTree is a Nix path literal referring to the staging dir.
+	// Absolute so the thunk file survives `cp` to a peer directory —
+	// see expr.Input.Ref docstring.
+	srcTreeLiteral := filepath.Join(l.Srcs, tuID)
 	_ = stageRes // reuse info is informational only under the new design
 
 	e := expr.Compile(expr.CompileParams{
@@ -126,7 +127,7 @@ func Compile(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.L
 	})
 
 	// 5. Dispatch on mode.
-	if mode.For(os.Getenv("NIXGG_MODE"), source) == mode.Realise {
+	if mode.For(source) == mode.Realise {
 		return realiseAndLink(e, output, cfg, l)
 	}
 

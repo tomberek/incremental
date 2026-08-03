@@ -34,7 +34,6 @@ exec "$BOOTSTRAP_NIX" develop "$here#fmt-env" --command bash -c '
   set +a
   export PATH="'"$here"'/bin:'"$here"'/shims:$PATH"
   export NIXGG_ROOT="'"$here"'"
-  export NIXGG_THUNKS_DIR="'"$FMT_SRC"'/.nixgg/thunks"
   export CC=cc CXX=c++
 
   cd "'"$FMT_SRC"'"
@@ -43,15 +42,21 @@ exec "$BOOTSTRAP_NIX" develop "$here#fmt-env" --command bash -c '
 
   # Configure: cmake compiler probes run in the shim; conftest-shaped
   # filenames get auto-realise-mode so probes see real .o files.
-  nixgg run -- cmake -S . -B build \
+  cmake -S . -B build \
     -G "Unix Makefiles" \
     -DCMAKE_BUILD_TYPE=Release \
     -DFMT_TEST=OFF -DFMT_DOC=OFF \
     -DBUILD_SHARED_LIBS=OFF
 
-  # Build: placeholder mode + force at end.
-  nixgg build --target build/libfmt.a -- \
-    cmake --build build -j'"$NIXGG_JOBS"'
+  # Build: link shim auto-forces. libfmt.a is an archive, not a link,
+  # so we still need `nixgg force` at the end to materialise it —
+  # unless we drove cmake to produce a binary.
+  export NIXGG_AUTOFORCE=1
+  cmake --build build -j'"$NIXGG_JOBS"'
+
+  # The output is an archive (no link step to trigger auto-force);
+  # explicitly realise it.
+  nixgg force build/libfmt.a
 
   ls -l build/libfmt.a
 '
