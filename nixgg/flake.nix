@@ -7,6 +7,19 @@
 {
   description = "nixgg — gg-style build accelerator using Nix CA derivations.";
 
+  # Auto-enable the experimental features mkNixggBuild needs. Users
+  # still get prompted the first time they build (Nix asks before
+  # trusting a flake's nixConfig), but after that
+  # `nix build .#hello` / `.#lua` Just Works.
+  nixConfig = {
+    extra-experimental-features = [
+      "ca-derivations"
+      "dynamic-derivations"
+      "configurable-impure-env"
+    ];
+    extra-system-features = [ "builder-rpc-v0" ];
+  };
+
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   # PR 15793 (NixOS/nix#15793) — adds the limited daemon socket inside
@@ -164,7 +177,23 @@
             nixgg       = nixggBin;
             nixHelpers  = nixHelpers;
             patchedNix  = patchedNix;
+            inherit system;
           };
+
+          # Concrete mkNixggBuild call sites, exposed as flake
+          # packages so `nix build .#hello` / `.#lua` Just Work. Each
+          # is the resolved final artifact — `builtins.outputOf`
+          # applied to the outer text-mode drv — so consumers see a
+          # normal store path, not a .drv.
+          hello = (import ./dyn-drv/hello-mkbuild.nix {
+            inherit mkNixggBuild;
+            inherit (pkgs) runCommand;
+          }).result;
+
+          lua = (import ./dyn-drv/lua-mkbuild.nix {
+            inherit mkNixggBuild;
+            inherit (pkgs) fetchurl stdenv;
+          }).result;
         in
         toolchain
         // {
@@ -174,11 +203,10 @@
           fmt-env = fmtEnv;
           patched-nix = patchedNix;
           nixgg-bin = nixggBin;
-          # mkNixggBuild is a function, not a derivation; expose it via
-          # a passthru attribute so consumers can `nixgg-hello =
-          # (self.packages.<system>.mkNixggBuild) { … };` in their
-          # flake.nix.
+          # mkNixggBuild is a function; expose so consumers can build
+          # their own targets in downstream flakes.
           inherit mkNixggBuild;
+          inherit hello lua;
           default = envShell;
         }
       );

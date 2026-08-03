@@ -22,6 +22,8 @@
   nixHelpers,   # nixgg-nix helper package (unused in sandbox mode, but
                 # kept so tests can run non-sandbox against the same builder)
   patchedNix,   # nix with builder-rpc-v0 + submit-output
+  system,       # target platform (e.g. "x86_64-linux"). Threaded from the
+                # flake outputs so this works under pure-eval.
 }:
 
 {
@@ -54,7 +56,7 @@ let
 
   drv = derivation {
   inherit name;
-  system = builtins.currentSystem;
+  inherit system;
   builder = "${bash}/bin/bash";
 
   # Every store path the outer builder + our shims + user command
