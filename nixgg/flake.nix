@@ -22,17 +22,12 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-  # PR 15793 (NixOS/nix#15793) — adds the limited daemon socket inside
-  # builder-rpc-v0 sandboxes plus the `nix store submit-output`
-  # command. Only used by `nixgg emit`'s `.sandboxed` variant.
-  #
-  # The PR is closed (not merged), so its head commit isn't on a
-  # branch of NixOS/nix. GitHub keeps `refs/pull/<N>/head` for every
-  # PR forever, so we fetch that ref via git+https. This works even
-  # if the fork is later deleted.
+  # The NixOS/nix master branch now contains the builder-rpc-v0 +
+  # `nix store submit-output` work from PR #15793. Track master so
+  # the resulting nix binary is substitutable from cache.nixos.org
+  # instead of forcing a full local build.
   inputs.nix-15793 = {
-    url = "git+https://github.com/NixOS/nix.git?ref=refs/pull/15793/head";
-    inputs.nixpkgs.follows = "nixpkgs";
+    url = "github:NixOS/nix";
   };
 
   outputs =
