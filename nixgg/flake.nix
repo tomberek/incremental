@@ -211,19 +211,60 @@
         }
       );
 
-      devShells = forEachSystem (system: pkgs: {
-        default = self.packages.${system}.mosh-env;
-      });
+      devShells = forEachSystem (system: pkgs:
+        let
+          pkgs' = self.packages.${system};
 
-      apps = forEachSystem (system: pkgs: {
-        nixgg = {
-          type = "app";
-          program = "${./nixgg}";
-        };
-        default = {
-          type = "app";
-          program = "${./nixgg}";
-        };
-      });
+          # Shell that has `nixgg` on PATH plus the shims/ dir prefixed
+          # ahead of the toolchain — so `cc foo.c -o foo` picks up
+          # nixgg's shim, not the raw compiler.
+          nixggShell = pkgs.mkShellNoCC {
+            name = "nixgg-shell";
+            packages = with pkgs; [
+              pkgs'.nixgg-bin
+              gcc
+              gnumake
+              coreutils
+              bash
+            ];
+            shellHook = ''
+              # Source the pinned NIXGG_* env plus PATH prefix.
+              # env-shell is the same block `nixgg env` prints; sourcing
+              # it directly avoids a fork-and-eval per shell entry.
+              . ${pkgs'.env-shell}
+
+              # Alt store default (env-shell doesn't set this — it's a
+              # per-user preference). Overridable.
+              : "''${NIXGG_STORE:=local?root=/tmp/nixgg-store}"
+              export NIXGG_STORE
+
+              # Prepend shims/ so `cc`, `c++`, `ar` etc. dispatch to
+              # the nixgg shim binary (busybox-style symlinks). bin/
+              # first so `nixgg` itself is on PATH too.
+              export PATH="${pkgs'.nixgg-bin}/bin:${pkgs'.nixgg-bin}/shims:$PATH"
+
+              # Opinionated default: link shim inline-realises, so
+              # plain `make` produces real binaries. Set to 0 to opt
+              # out.
+              : "''${NIXGG_AUTOFORCE:=1}"
+              export NIXGG_AUTOFORCE
+
+              echo "nixgg shell — 'nixgg --help', 'cc -v', 'which make'" >&2
+            '';
+          };
+        in
+        {
+          default = nixggShell;
+          # Keep the toolchain-dev shells reachable under explicit names.
+          mosh = pkgs'.mosh-env;
+          fmt  = pkgs'.fmt-env;
+        });
+
+      apps = forEachSystem (system: pkgs:
+        let bin = "${self.packages.${system}.nixgg-bin}/bin/nixgg"; in
+        {
+          nixgg = { type = "app"; program = bin; };
+          default = { type = "app"; program = bin; };
+        });
     };
 }
