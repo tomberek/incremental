@@ -1,115 +1,166 @@
-# nixgg architecture (Go rewrite)
+# nixgg architecture
 
-nixgg is a `gg`-style build accelerator that treats every `-c` compile,
-`ar` archive, and link invocation as a content-addressed **Nix
-derivation**. The user runs make (or ninja, or cmake) as usual; nixgg
-shims sit on PATH in place of the real compiler, and every `cc`/`ar`
-call turns into a `.nix` expression file (a "thunk") rather than a
-real compile. A single `nix build` at the end realises the whole DAG.
+nixgg is a build accelerator that treats every `-c` compile, `ar`
+archive, and link invocation as a content-addressed **Nix
+derivation**. You run make / cmake / ninja as usual; nixgg shims sit
+on PATH in place of the real compiler; each `cc`/`c++`/`ar` call
+turns into a Nix derivation. Nix decides what's cached and what
+needs building — nixgg just constructs the expressions.
 
-The redesign in July 2026 dropped a lot of complexity: the old bash
-implementation had per-shim `argv-caches`, `tid-markers`, `.link.*`
-markers — a bespoke cache tier that memoized Nix's own eval cache
-outside Nix. Once we accepted the framing that **Nix is a replacement
-for execv that caches and distributes work**, all of that came out.
-The shim's only job is to translate an `execv` call into a Nix
-expression. Nix's own eval cache is authoritative for "already built."
+Two modes for producing those derivations:
 
-Everything is written in Go and ships as a single static binary
-(`CGO_ENABLED=0`, ~2.9 MB). Six of the argv[0] names are handled by
-symlinks to the same ELF (busybox-style dispatch).
+- **Native mode** (default): shims write `.nix` thunk files on disk;
+  `nixgg force` (or the link shim's `NIXGG_AUTOFORCE=1` hook) does
+  one `nix build --file <helper> …` at the end. This is the "make
+  it work on my machine" path — no experimental Nix features, works
+  against any recent daemon.
+- **Sandbox / dyn-drv mode** (`NIXGG_SANDBOX=1`, requires the
+  patched Nix from PR [#15793][pr]): shims use `nix derivation add`
+  to register derivations directly with the daemon. The link shim
+  calls `nix store submit-output` for the final target. Consumers
+  reach the compiled artifact via `builtins.outputOf`. This is what
+  makes `nix build .#hello` and `nix build .#lua` Just Work from a
+  regular flake.
 
-## Two-line summary
+The whole tool is Go, ships as a single static ELF (~2.9 MB), no
+CGO, no third-party deps.
 
-- **Shim mode**: every compile/link/archive gets translated into a
-  `.nix` expression, written as a thunk file, and the output slot is
-  a symlink to that thunk. No `nix build` runs inside a shim.
-- **Force mode** (`nixgg force <target>` or `nixgg build --target …
-  -- <cmd>`): after the tool exits, we walk the thunk DAG, emit one
-  helper `.nix` that exposes every reachable thunk as an attribute,
-  and run **one** `nix build --file <helper> root t0 t1 …`. Nix
-  handles the DAG.
+[pr]: https://github.com/NixOS/nix/pull/15793
+
+## The invariant
+
+> Every shim writes a derivation. Nix decides everything else.
+
+That's the only rule. It's what makes native mode and sandbox mode
+share the same call sites, and it's what makes reasoning about
+correctness simple.
+
+The one carveout is autoconf/cmake probes (`conftest*`,
+`CMake*Compiler*`, `Check*Exists`). Those need a runnable output for
+the configure logic to `if ./conftest; then …`. In those specific
+cases the compile shim realises synchronously via a per-invocation
+`nix build --file`. `mode.For(path)` decides — no env var involved,
+purely filename-driven.
+
+## User-facing entry points
+
+```bash
+# native mode — plain make, shims write thunks, force at end
+eval "$(nixgg env)"
+export NIXGG_AUTOFORCE=1        # optional; link shim realises inline
+make -j$(nproc)
+
+# sandbox / dyn-drv mode — via flake
+nix build .#hello               # produces bin-hello/hello ELF
+nix build .#lua                 # produces bin-lua/lua ELF (Lua 5.4.7)
+```
+
+Flake packages currently exposed:
+
+- `nixgg-bin` — the Go binary + shims tree, built via `buildGoModule`.
+- `mkNixggBuild` — the Nix function that wraps a user build command
+  in a `builder-rpc-v0` derivation whose output is a `.drv` file
+  (dynamic derivation).
+- `hello`, `lua` — concrete call sites of `mkNixggBuild` you can
+  build directly.
+- `env-shell`, `mosh-env`, `fmt-env`, `patched-nix`, `nixgg-nix`
+  (helper package), toolchain roots — supporting bits.
+
+## CLI
+
+Two subcommands. Everything else was cargo-culted from an older
+design and has been removed.
+
+- **`nixgg env`** — prints a shell-sourceable block: NIXGG_* env
+  vars, PATH prefix, CC/CXX. `eval "$(nixgg env)"` is the bootstrap.
+- **`nixgg force [--roots] <target…>`** — escape hatch. Native mode
+  only. Realises thunks left on disk after a build that ran without
+  `NIXGG_AUTOFORCE=1`. `--roots` picks up any leaf thunk (not
+  imported by any other) and forces the manifest of caller-visible
+  symlinks pointing at it.
+
+Shim entry (busybox-style: argv[0] ∈ {cc, gcc, c++, g++, ar, ranlib}
+dispatches to the corresponding internal handler).
 
 ## Binary layout
 
 ```
 nixgg/
-├── main.go                     argv[0] dispatch (busybox-style)
+├── main.go                     argv[0] dispatch
 ├── go.mod                      no external deps; stdlib only
 ├── bin/nixgg                   built static ELF (git-ignored)
 ├── shims/                      symlinks: cc, gcc, c++, g++, ar, ranlib → ../bin/nixgg
-├── nix/                        Nix helper package (imported by thunks)
-│   ├── builder.nix             per-TU CA derivation
-│   ├── linker.nix              link CA derivation
-│   ├── archiver.nix            ar CA derivation
-│   ├── pure-store-path.nix     pure-eval-safe builtins.storePath replacement
-│   └── toolchain.nix           GENERATED by the flake: compiler/bash/coreutils roots
-├── flake.nix / flake.lock      pinned nixpkgs; produces env-shell + nixgg-nix + mosh-env
-├── example/                    smoke-test Makefile (main.cc + util.cc + util.h)
-├── redis.sh mosh.sh fmt.sh     integration scripts
-└── internal/                   Go packages (each below)
+├── nix/
+│   ├── builder.nix             per-TU CA derivation (native mode)
+│   ├── linker.nix              link CA derivation (native mode)
+│   ├── archiver.nix            ar CA derivation (native mode)
+│   ├── pure-store-path.nix     pure-eval-safe builtins.storePath
+│   ├── toolchain.nix           GENERATED by the flake
+│   └── mkNixggBuild.nix        outer wrapper for dyn-drv mode
+├── flake.nix / flake.lock      pinned nixpkgs; produces env-shell,
+│                               nixgg-bin, hello, lua, mkNixggBuild, …
+├── dyn-drv/                    dyn-drv exploration + test fixtures
+│   ├── NOTES.md                what we learned about builder-rpc-v0
+│   ├── config.nix              test helper
+│   ├── dyn-one-layer.nix       smallest dyn-drv chain (no sandbox)
+│   ├── dyn-json-drv.nix        working `nix derivation add` fixture
+│   ├── hello-mkbuild.nix       hello.cc via mkNixggBuild
+│   └── lua-mkbuild.nix         lua 5.4.7 via mkNixggBuild
+├── example/                    smoke-test Makefile (main.cc + util.cc)
+├── lua.sh redis.sh mosh.sh
+├── fmt.sh zstd.sh ninja.sh     integration scripts (native mode)
+└── internal/
     ├── dispatch/               argv[0] classification, @rspfile expansion
-    ├── mode/                   placeholder vs. realise decision
-    ├── toolchain/              NIXGG_* env loading with clear error on missing
-    ├── paths/                  .nixgg/{thunks,srcs,scans,symlinks}/ layout
-    ├── stage/                  hardlink staging (src+headers into .nixgg/srcs/<tu-id>)
-    ├── scan/                   gcc -MM -MG + mtime-invalidated cache
+    ├── mode/                   placeholder vs. realise (filename patterns)
+    ├── toolchain/              NIXGG_* env loading
+    ├── paths/                  .nixgg/{thunks,srcs,scans,symlinks,promoted}/
+    ├── stage/                  hardlink staging (src+headers)
+    ├── scan/                   gcc -MM -MG + mtime cache
     ├── wrapperenv/             capture NIX_CFLAGS_COMPILE etc into JSON
-    ├── storedeps/              regex /nix/store/... refs out of flags/env
-    ├── classify/               resolve a symlink → Store/Thunk/Regular/Absent
-    ├── expr/                   build Nix expression strings (byte-deterministic)
-    ├── thunk/                  hash + write .nix, symlink output, record manifest
-    ├── shim/                   compile / link / archive shim entrypoints
-    └── cli/                    run / eval / force / build / env subcommands
+    ├── storedeps/              regex /nix/store/... refs from flags/env
+    ├── classify/               resolve symlink → Store/Thunk/Drv/Regular/Absent
+    ├── expr/                   Nix expression + JSON drv emitters
+    ├── thunk/                  hash + write .nix, symlink output
+    ├── sandbox/                nix derivation add / store add / submit-output
+    ├── realise/                DAG-walk + one `nix build` at end (native)
+    ├── shim/                   compile / link / archive entrypoints
+    └── cli/                    env / force
 ```
 
-Total: ~3000 lines of Go, no CGO, no third-party deps.
+Total ~3600 lines of Go, no CGO, no third-party deps.
 
-## The invariant
+## The `.nixgg/` workspace (native mode)
 
-> Every shim writes a thunk. One `nix build` at the end.
+Every project accumulates a `.nixgg/` tree at its root. `paths.Resolve`
+picks the workspace root by walking up from `$PWD`:
 
-This is the only rule that matters. It's what makes the tool
-composable with dynamic derivations later (the same shim behavior
-running *inside* a Nix sandbox produces the same DAG that gets built
-by an outer `nix store submit-output`), and what makes reasoning about
-correctness simple: Nix decides what's cached and what needs building.
-nixgg just constructs the expressions.
+1. `$NIXGG_THUNKS_DIR` if set.
+2. Nearest ancestor containing an existing `.nixgg/`.
+3. Nearest ancestor with `.git`; auto-seed `.nixgg/` there.
+4. `$PWD/.nixgg/`.
 
-The one carveout is autoconf/cmake probes (`conftest*`, cmake's
-CheckXxx / TryCompile scratch). Those need a *runnable* output for
-the configure logic to `if ./conftest; then …`. In those specific
-cases the shim realises the thunk synchronously via a per-invocation
-`nix build --file`. `mode.For(envMode, path)` decides.
-
-## The `.nixgg/` directory
-
-Every project accumulates a `.nixgg/` tree in whatever directory the
-top-level `nixgg run` / `nixgg build` picked as its thunks dir
-(defaults to `$PWD/.nixgg/`). All shims in the descendant process tree
-share this dir through `$NIXGG_THUNKS_DIR`.
+Recursive-submake projects (deps/*, lib/, programs/) all converge on
+one thunks dir without extra plumbing.
 
 ```
 .nixgg/
 ├── thunks/     ← <thunk-id>.nix files (one per derivation)
 ├── srcs/       ← <tu-id>/ dirs, hardlinks of source + headers
 ├── scans/      ← <scan-key>.{out,err,deps} — scan-headers memoization
-├── symlinks/   ← <thunk-id> manifest — which caller-visible symlinks point at me
-└── promoted/   ← <sha1(abs-path)> — regular file X was built from thunk Y at store Z
+├── symlinks/   ← <thunk-id> manifest — caller-visible paths → me
+└── promoted/   ← <sha1(abs-path)> — regular file X was built from thunk Y
 ```
 
 ### `thunks/<thunk-id>.nix`
 
-The content-addressed Nix expression for one compile / link / archive.
-`<thunk-id>` is `sha256(expression body)[:32]` — same expression body
+Content-addressed Nix expression for one compile/link/archive.
+`<thunk-id>` = `sha256(expression body)[:32]` — same expression body
 → same file, so writes are idempotent.
-
-Content is one `import <helper> { … };` call:
 
 ```nix
 import /nix/store/…-nixgg-nix/builder.nix {
   toolBasename   = "gcc";
-  srcTree        = ../srcs/ae-a7f2c3d18e04;
+  srcTree        = /abs/path/.nixgg/srcs/ae-a7f2c3d18e04;
   source         = "src/ae.c";
   outName        = "ae.o";
   flagsJSON      = ''["-O3","-Wall",…]'';
@@ -118,135 +169,76 @@ import /nix/store/…-nixgg-nix/builder.nix {
 }
 ```
 
-- Toolchain roots (compilerRoot, bashRoot, coreutilsRoot) are *not*
-  in the thunk. Each helper (`builder.nix`, `linker.nix`,
-  `archiver.nix`) defaults them from `import ./toolchain.nix` — the
-  toolchain.nix file generated once by the flake into the `nixgg-nix`
-  store package. Toolchain rev bumps only touch that one file.
-- `srcTree` is a **Nix path literal** (`../srcs/<tu-id>`), not a
-  string. Nix resolves it relative to the thunk file's directory and
-  imports the referenced tree into the store at eval time. That's why
-  the shim doesn't need to call `nix store add`.
-- Sibling thunks are referenced as `import ./<sib-id>.nix` — a
-  relative path so thunk file content is cwd-independent. `nixgg
-  force` walks these to enumerate the DAG.
+Paths are absolute. Two consequences:
 
-**Key**: sha256 of the expression body.  
-**Invalidation**: any change to flags, source name, output name,
-included store deps, wrapper env, or the referenced helper store path
-(`/nix/store/…-nixgg-nix/…`).
+- `cp` of a thunk symlink to a peer directory (a real Makefile pattern
+  — e.g. `cp obj/foo dest/foo`) is non-destructive; the copy's
+  imports still resolve.
+- `nix build --file <any-thunk-path>` works from any cwd.
+
+Trade-off: `.nixgg/` no longer moves with `mv`. Rename a workspace →
+`rm -rf .nixgg && rebuild`. Store outputs are unaffected because
+absolute vs. relative paths in a Nix expression produce byte-identical
+CA hashes (Nix hashes the *value* of the import, not its spelling).
 
 ### `srcs/<tu-id>/`
 
-One dir per TU, populated with hardlinks to the source file + every
-header `scan-headers.sh` discovered. Structure mirrors the "project
-root" (common ancestor of cwd + every user `-I` dir); headers land at
-their project-root-relative path.
+Hardlinks of source + every header the scanner discovered.
+`<tu-id>` = `<slug>-<12 hex>`, hex = `sha256(abs-output)[:12]`.
+Prevents collisions when two compiles from different cwds produce
+outputs with the same basename (redis has both `src/sds.o` and
+`deps/hiredis/sds.o`).
 
-**`<tu-id>` format**: `<slug>-<12 hex>`. Slug is the output basename
-(e.g. `ae`, `sha256`); hex is `sha256(abs-output-path)[:12]`. The hash
-is what prevents collisions when two compiles from different cwds
-produce outputs with the same basename (redis has both `src/sds.o` and
-`deps/hiredis/sds.o` — same base, different absolute paths → different
-tu-ids → separate staging dirs).
-
-**Reuse check**: for every (abs-path, staged-relpath) pair, `stat`
-both and compare inodes. Hardlinks share an inode with the original;
-inode-match ⇔ "the working-tree file wasn't rewritten since we linked
-it." Editor write-then-rename patterns break the hardlink; the
-original's inode changes and we detect it. Also verify the set of
-files in the staging matches the current header list (catches header
-removals).
-
-**Invalidation**: any inode mismatch OR any missing/extra file →
-`rm -rf` the dir and repopulate. Hardlinks are cheap; reconciliation
-would be more complex than restaging.
+Reuse check: for every (abs, staged-rel) pair, `stat` both and compare
+inodes. Hardlink → same inode. Inode mismatch or file-set mismatch →
+`rm -rf` and repopulate.
 
 ### `scans/<key>.{out,err,deps}`
 
-Cache of `gcc -MM -MG` output. `<key>` = `sha256(compiler + source +
-sorted flags)[:32]`.
-
-- `.out`: header list (one `<abs>\t<rel>` per line, sorted).
-- `.err`: `PROJECT_ROOT=`, `STAGED_IFLAG=`, `STORE_IFLAG=` lines the
-  driver consumes.
-- `.deps`: `<abs>\t<mtime-nsec>` per file the scan referenced. On
-  next lookup, batch-stat every path and compare mtimes.
-
-**Key**: sha of (compiler, source, sorted flags).  
-**Invalidation**: any file in `.deps` has an mtime newer than
-recorded, or is missing → re-run the scanner.
-
-Motivation: `gcc -MM -MG` is a full-parse fork. Skipping it on warm
-rebuilds is where most of the shim overhead reduction comes from.
+Cache of `gcc -MM -MG`. Key = `sha256(compiler + source + sorted flags)`.
+`.deps` records `<abs>\t<mtime-nsec>` per referenced file; next lookup
+batch-stats and compares.
 
 ### `symlinks/<thunk-id>`
 
-Append-only manifest: one absolute-path line per caller-visible
-symlink pointing at this thunk (or later, at its store output). Read
-by `nixgg force` to promote every symlink in the DAG in one pass.
+Append-only manifest of caller-visible symlinks pointing at this
+thunk. Read by force to promote them all in one pass. Stale entries
+filtered at read time.
 
-**Key**: thunk-id.  
-**Invalidation**: none — append-only. Stale entries (user deleted the
-file) are filtered by `[[ -L "$sym" ]]` at read time in force.
+### `promoted/<sha1(abs)>`
 
-### `promoted/<sha1(abs-target)>`
+Two-line file: `<thunk-id>\n<store-path>`. Written by
+`realise.PromoteToStore` after copying store bytes into the working
+tree. Read by `classify.Target` when a link/ar shim sees a regular
+file on disk — "was this a nixgg-produced file? which thunk?"
 
-One file per caller-visible file that force has promoted from a store
-output. Content is two lines:
+**Why bytes not symlinks**: Nix pins store-path mtimes to 1969. A
+symlink to `/nix/store/…` shows an ancient mtime under `stat(2)`, so
+make would treat the .o as older than the .c and recompile forever.
+Byte-copies let `chtimes(now)` make the dependency check correct.
 
-```
-<thunk-id>
-<store-path>
-```
-
-Written by `force.promoteToStore` after copying bytes from
-`/nix/store/…/foo.o` into `<abs-target>`. Read by `classify.Target`:
-when a link/ar shim encounters an input like `foo.o`, and that file
-is a regular file on disk (not a symlink), classify checks this
-registry to determine "was this a nixgg-produced file?"
-
-Force copies bytes rather than symlinking because Nix pins store-path
-mtimes to 1969 (for reproducibility); a symlink to /nix/store/… would
-make `stat(2)` see an ancient mtime, and make would always consider
-the .o older than its .c → recompile every warm rebuild. A copy lets
-us `chtimes(now)` so make's dependency check works correctly.
-
-**Key**: sha1 of the absolute target path.  
-**Invalidation**: `thunk.LinkPlaceholder` removes the promoted entry
-when the shim writes a new placeholder symlink at the same target.
-After that, classify sees a symlink → .nix and correctly returns
-Thunk (not stale Store).
-
-## Flow: one shim invocation
+## Flow: one compile shim invocation (native mode)
 
 ```
 make → cc (symlink to nixgg binary)
   │
   ▼
-nixgg main.go: argv[0] = "cc" → dispatch.FromArgv0 = ToolCC
+main.go: argv[0]=cc → dispatch.ToolCC → shim.Compile
   │
-  ▼
-if argv contains "-c" → shim.Compile
-  │
-  ├─ parseCompileArgs: source, output, non-path flags
-  │    (drops -M/-MM/-MG/-MP/-MD/-MMD/-MF/-MT/-MQ — sandbox-invalid)
+  ├─ parseCompileArgs: source, output, flags (dropping -M* sandbox-invalid)
   │
   ├─ scan.Run: gcc -MM -MG (cached under .nixgg/scans/)
-  │    → header list + project root + staged -I flags + store -I flags
+  │    → headers, project root, staged -I flags, store -I flags
   │
-  ├─ stage.TUID(abs(output)) → e.g. "ae-a7f2c3d18e04"
-  ├─ stage.Sources: reuse .nixgg/srcs/<tu-id>/ if inodes match, else
-  │    rm -rf and hardlink source + every header
+  ├─ stage.TUID(abs-output), stage.Sources:
+  │    reuse .nixgg/srcs/<tu-id>/ if inodes match; else rm+hardlink
   │
-  ├─ rewriteFlags: strip caller -I family, append staged + store -I
-  ├─ wrapperenv.JSON: NIX_CFLAGS_COMPILE etc → sorted JSON
-  ├─ storedeps.From: regex /nix/store/... roots in flags/env
+  ├─ rewriteFlags, wrapperenv.JSON, storedeps.From
   │
   ├─ expr.Compile → Nix expression string (byte-deterministic)
   │
-  ├─ if mode.For(source) == Realise:
-  │    → thunk.Write + nix build --file --print-out-paths
+  ├─ if mode.For(source) == Realise:  (autoconf/cmake probe)
+  │    → thunk.Write + nix build --file … --print-out-paths
   │    → link output → /nix/store/…-tu-foo.o/foo.o
   │
   └─ else (placeholder — the common path):
@@ -256,127 +248,144 @@ if argv contains "-c" → shim.Compile
        └─ thunk.RecordSymlink   → .nixgg/symlinks/<id> += output
 ```
 
-No process fork per shim beyond the one `gcc -MM -MG` (cached).
-Everything else is Go: string building, stat, hardlink, atomic file
-write.
+No fork per shim beyond the one `gcc -MM -MG` (scan-cached). The
+link shim additionally, if `NIXGG_AUTOFORCE=1`, calls
+`realise.Realise` on its just-written link thunk — batches the whole
+DAG into one `nix build`.
 
-## Flow: `nixgg force <target>`
+## Flow: sandbox mode (`NIXGG_SANDBOX=1`)
+
+Compile / archive / link shims all follow the same shape, differing
+only in which JSON emitter they use.
 
 ```
-1. classify.Target(target)
-   → Thunk (target is symlink → thunk file)          → walk
-   → Store + ThunkID (regular file, promoted before) → look up thunk, walk
-   → Regular (unknown file) / Absent                 → skip
-2. collectThunks(root): walk `import ./<id>.nix` transitively;
-   collect every reachable thunk file path
-3. writeForceHelper: emit temp .nix in the thunks dir:
-      {
-        root = import "/…/target.nix";
-        t0   = import "/…/child0.nix";
-        t1   = import "/…/child1.nix";
-        …
-      }
-4. nix build --file <helper> --refresh root t0 t1 … --print-out-paths
-   → one process, one eval, one daemon session realises the whole DAG
-   → --refresh forces re-hashing of `srcTree` path expressions when
-     staging dir contents changed under an otherwise-identical thunk
-     file (byte-identical thunk expressions can produce different
-     outputs if their imported paths changed)
-5. For each attr's printed store path:
-   a. promoteToStore: copy bytes from /nix/store/…/basename to the
-      caller-visible target, chtimes(now), record promoted-registry
-   b. promoteManifest(<child-id>, storePath) for each child — read
-      .nixgg/symlinks/<id>, promote every listed target
+shim runs (inside builder-rpc-v0 sandbox)
+  │
+  ├─ stage.Sources: hardlink source+headers into $TMPDIR/.nixgg/srcs/<tu-id>/
+  │
+  ├─ sandbox.StoreAddScan (compile only):
+  │    nix store add --scan -n src-<name> <staged-dir>
+  │    → returns /nix/store/…-src-<name>
+  │
+  ├─ expr.CompileJSON / LinkJSON / ArchiveJSON:
+  │    Assemble the JSON derivation description Nix's `nix derivation add`
+  │    accepts. inputs.drvs entries reference upstream .drv basenames;
+  │    inputs.srcs uses store-path basenames (NOT full /nix/store/... —
+  │    the parser rejects the leading slash).
+  │
+  ├─ sandbox.DerivationAdd:
+  │    echo <json> | nix derivation add
+  │    → returns /nix/store/…-<name>.drv
+  │
+  ├─ sandbox.PointOutputAtDrv: symlink caller-visible output at that .drv path.
+  │    classify.Target sees the .drv suffix → returns Kind.Drv; downstream
+  │    link/archive shims include it under their inputs.drvs.
+  │
+  └─ link shim additionally, iff basename matches NIXGG_SANDBOX_TARGET:
+     sandbox.SubmitOutput: nix store submit-output <drv> out
+     → registers this drv as the outer derivation's `out`.
 ```
 
-**The key optimisation vs a naive impl**: `nix build` is called
-exactly **once**, not once per thunk. On a lua warm rebuild that's
-one 500ms Nix invocation instead of 30+ × 100ms. This alone took
-warm-lua from ~10s to ~200ms.
+The outer `mkNixggBuild` derivation is marked `outputHashMode =
+"text"`, name ending in `.drv`. Its output IS the submitted `.drv`
+file. Consumers reach the compiled artifact via
+`builtins.outputOf outer.outPath "out"` — Nix walks: build outer →
+read its output (a `.drv`) → build that inner drv → return its
+output.
 
-**Why bytes are copied, not symlinked**: Nix pins store-path mtimes
-to 1969 for reproducibility. A caller-visible `.o` symlink to a
-store path would appear older than its `.c` source to make, forcing
-a full recompile on every subsequent make invocation. Byte-copies
-let force `chtimes(now)` on the target so make sees it as
-up-to-date.
+For the exact placeholder digest algorithm (nix32-encoded sha256 of
+`"nix-upstream-output:<drvHashPart>:<pathName>"`), see
+`expr.caOutputPlaceholder` — verified byte-exact against
+`builtins.outputOf` via a pinned test vector.
 
-## Modes
+## Placeholder vs. Realise (mode.For)
 
-- **Placeholder** (default): shim writes a thunk file, output is a
-  symlink to that thunk. Zero Nix calls in the shim path. `nixgg
-  force` at the end realises the DAG in one shot.
-- **Realise** (carveout): shim writes the thunk *and* invokes `nix
-  build --file <thunk>` synchronously, then symlinks the output to
-  the resulting store path. Reserved for autoconf conftests / cmake
-  probes where a downstream `if ./probe; then …` needs a runnable
-  file *right now*. `mode.For(env, path)` picks realise if
-  `NIXGG_MODE=realise`, or if the source/output matches a conftest
-  or cmake-probe pattern.
+The compile shim decides per-TU whether to defer (Placeholder) or
+realise synchronously. Purely filename-driven, no env var:
 
-Both modes produce **bit-identical** `/nix/store/…-tu-<name>.o` paths
-for identical inputs — the mode only affects *when* the realisation
-happens.
+- `conftest*` → autoconf configure probe.
+- `test?Compiler*`, `CMake*Compiler*` → cmake compiler-detection.
+- `Check*Exists`, `Check*Include`, `Check*SourceCompiles`,
+  `Check*SourceRuns`, `Check*SymbolExists`, `Check*TypeSize` → cmake
+  Check* macros.
+- `*/CMakeFiles/CMakeScratch/*`, `*/CMakeFiles/CMakeTmp/*` → cmake
+  TryCompile scratch dirs.
+
+Every pattern here was added because a real project tripped it.
 
 ## What every CA hash includes
 
-For a compile derivation:
+For a compile derivation, native or sandbox:
 
-- Compiler binary content (via `compilerRoot` → pinned by
-  `flake.lock`).
-- `toolBasename` (which of cc/gcc/c++/g++ to invoke inside the sandbox).
-- `srcTree` NAR-hash (Nix imports our staging dir).
-- `source` — relative path inside srcTree, e.g. `"src/ae.c"`.
+- Compiler binary content (via `compilerRoot` → pinned by flake.lock).
+- `toolBasename` (cc/gcc/c++/g++).
+- `srcTree` NAR-hash — Nix imports the staged directory.
+- `source` — relative path inside srcTree.
 - `flags` — order-preserved JSON array.
-- `wrapperEnv` — sorted JSON object of NIX_CFLAGS_COMPILE et al.
-- `storeDeps` — sorted array of `/nix/store/…` roots referenced by
-  flags/env; these are made available inside the sandbox.
-- `bash + coreutils` (baked into builder.nix's helpers at
-  nixgg-nix realise time).
+- `wrapperEnv` — sorted JSON object (NIX_CFLAGS_COMPILE et al).
+- `storeDeps` — sorted array of `/nix/store/…` roots referenced.
+- `bash + coreutils` (baked into helpers at nixgg-nix realise time).
 
-Nix computes the CA hash after our staging dir NAR + all the args
-above. Change any bit → different CA output path.
+Native and sandbox modes produce **bit-identical** store paths for
+identical inputs. The mode only affects *when* realisation happens
+and *how* Nix is asked to do it.
 
-## `nixgg` CLI subcommands
+## Performance snapshots
 
-- **`run [--mode realise|placeholder] -- <cmd>`**: Set up shim env
-  (PATH, NIXGG_MODE, NIXGG_THUNKS_DIR) and `exec <cmd>`. Used by
-  integration scripts to wrap `make`. If NIXGG_MODE is already set
-  in the parent env, it's honored (so a top-level script can wrap
-  several `nixgg run --` calls in one placeholder scope).
+### Native mode
 
-- **`eval -- <cmd>`**: Alias for `run --mode placeholder --`.
+Warm rebuild of lua after edit is 1.8s (mostly the shim pass + one
+`nix build` on the whole DAG). Zstd cold is 2.8s. Redis cold is
+~1m30s (175 TUs across deps + src).
 
-- **`force [--roots] <target…>`**: Realise the target(s). Each is
-  classified; thunk-symlinks go through the walk-and-batch path
-  described above. `--roots` picks up any thunk-id not imported by
-  any other thunk (leaf DAG nodes) and forces them — handles build
-  systems that hide outputs from dry-run (cmake's cmake_link_script
-  invoking ar).
+### Sandbox mode (dyn-drv)
 
-- **`build --target FILE [--target …] -- <cmd>`**: Eval + force in
-  one shot. Runs `<cmd>` in placeholder mode, then forces each
-  --target. This is the primary user-facing entry point.
+- **hello** (1 TU + 1 link): 5.7s cold via `nix build .#hello`.
+- **lua** (32 TUs + 1 archive + 1 link): 10.7s cold, 8.5s warm.
 
-- **`env`**: Print `export NIXGG_ROOT=…; export PATH=<shims>:$PATH`
-  lines for shell integration.
+Warm is currently slow-ish because the shim redoes the JSON drv
+construction every time. Nix's own eval cache short-circuits the
+actual builds — the same drv-hash → cache hit — but we're paying
+`fork+exec nix derivation add` × ~35 per rebuild. A per-project drv
+cache (mtime-based) would drop this to sub-second.
 
-## Flake artifacts
+## Correctness properties
 
-`flake.nix` produces:
+- **Content-addressed identity**: same source + same flags = same
+  store path. `git checkout` bumping mtimes doesn't force rebuild
+  (the shim's thunk id is unchanged; scan-cache validates via mtime
+  but recovers via CA hash).
+- **Distributable**: any machine with the same flake pin produces
+  the same store paths. Point at a substituter → other developers
+  pull instead of compile.
+- **Deterministic**: back-to-back builds produce byte-identical
+  outputs (barring toolchain-embedded timestamps like redis's
+  `mkreleasehdr.sh`).
 
-- **`env-shell`**: sourceable `export NIXGG_*=/nix/store/…` block.
-  Sourced by integration scripts as their bootstrap.
-- **`nixgg-nix`**: `./nix` copied into the store + generated
-  `toolchain.nix`. Every thunk imports its helper from this store
-  path.
-- **`mosh-env` / `fmt-env`**: `nix develop` shells for the mosh/fmt
-  integration workloads. Provide autoconf, protoc, pkg-config, etc.
-- **`patched-nix`**: PR-15793 nix binary — reserved for the future
-  `nixgg emit` sandboxed variant (dynamic-derivation build).
+## What we don't (yet) do
 
-Alt store: default `local?root=/tmp/nixgg-store`. Override with
-`NIXGG_STORE=…`.
+- **Warm-path drv memoization** for sandbox mode. Every rebuild
+  re-runs the shim pass and pipes each JSON drv through `nix
+  derivation add`. Same drv-hash → same store path via Nix's eval
+  cache, so no wasted builds, but the fork+exec overhead accumulates
+  on projects with many TUs.
+- **Multi-target dyn-drv builds**. `mkNixggBuild` submits exactly
+  one final drv. Projects with multiple binaries (lua's lua + luac,
+  mosh's client + server) currently need one `mkNixggBuild` call per
+  binary — meaning N full compile+link chains. A single-outer,
+  multi-drv-output shape is possible but requires more plumbing.
+- **Native-mode integration scripts using sandbox mode.** redis.sh,
+  mosh.sh, fmt.sh, zstd.sh, ninja.sh all still use native mode.
+  Sandbox-mode versions would look like:
+  `nix build path:.#nixgg-redis` — but need mkNixggBuild extensions
+  first (multi-target, mosh's autoconf phase, cmake integration).
+- **Activity log emission** (`NIXGG_LOG=/path.ndjson`). Old bash
+  version had per-shim JSON events; Go rewrite dropped it. Easy to
+  add if needed.
+- **Cmake/ninja target introspection** wrappers. nix-ninja
+  (github.com/pdtpartners/nix-ninja) is a full implementation of
+  this pattern for ninja graphs; we may end up interop-ing with it
+  rather than reinventing.
 
 ## Building the binary
 
@@ -384,73 +393,11 @@ Alt store: default `local?root=/tmp/nixgg-store`. Override with
 CGO_ENABLED=0 go build -ldflags='-s -w' -tags 'osusergo netgo' -o bin/nixgg .
 ```
 
-Produces a static 2.9MB ELF. `shims/` contains symlinks pointing at
-`../bin/nixgg`; add `shims/` to PATH (or `eval "$(bin/nixgg env)"`)
-and every subsequent `cc`/`c++`/`ar` invocation hits nixgg.
+Or via the flake:
 
-The flake output for building the binary in-store is a follow-up
-item — right now you `go build` locally.
+```
+nix build .#nixgg-bin
+```
 
-## Performance snapshots
-
-### Lua 5.4 (34 C files, plain Makefile, clean incremental story)
-
-Lua is the canonical benchmark for incremental correctness because
-plain `make` no-op is 9ms (make correctly says "Nothing to be done").
-This lets us measure nixgg's overhead honestly.
-
-| Scenario | nixgg (Go) | Plain make |
-|---|---|---|
-| True cold (empty store) | 12.0s | 260ms |
-| Warm no-op (steady state) | **190ms** | 456ms* |
-| Edit one .c → rebuild + relink | 4.4s | ~1s |
-
-*plain make no-op number is via `nix develop --command make linux`;
-`make linux` recurses which is why it's slower than the bare 9ms.
-
-**On steady-state warm no-op, nixgg is 2.4x faster than nix develop +
-plain make** because our binary starts faster than `nix develop` sets
-up its shell.
-
-### Redis (~175 TUs including deps, autoconf-adjacent, dirty Makefile)
-
-Redis fires its own distclean via `.make-prerequisites` every warm
-run, so no build system can be fast here. Numbers on this workload
-mostly measure "how well does nixgg tolerate churn":
-
-| Scenario | Time |
-|---|---|
-| True cold (empty alt store) | ~80s (175 TU compiles + link) |
-| Warm (mostly-cached, but redis re-runs distclean) | ~2-5s |
-
-## Correctness properties
-
-- **Content-addressed identity**: same source content + same flags
-  = same store path. `git checkout` bumping mtimes doesn't force a
-  rebuild because the copy in the working tree has a fresh mtime
-  from the last force run, and the shim's thunk id is unchanged.
-- **Distributable**: any machine with the same toolchain (via the
-  flake pin) produces the same store paths. Point at a substituter
-  and other developers pull instead of compile.
-- **Deterministic**: back-to-back builds produce byte-identical
-  outputs (barring toolchain-embedded timestamps like redis's
-  `mkreleasehdr.sh`, which is upstream's fault, not ours).
-
-## What we don't (yet) do
-
-- **No activity log emission** (`NIXGG_LOG=/path.ndjson`). The bash
-  version had per-shim JSON events; the Go rewrite dropped that
-  because we weren't using it. Trivial to add back.
-- **No `nixgg stats`** for consuming the activity log.
-- **No `nixgg emit`** for producing a self-contained `.nix` file that
-  runs a target as a dynamic derivation. This is the eventual goal
-  the whole architecture points at — the placeholder-only design
-  means the shim graph produced *inside* a sandboxed dynamic
-  derivation matches the graph produced outside it, so `emit` can
-  be a mechanical transformation.
-- **No flake package** for the Go binary. `nix build .#nixgg` should
-  eventually produce a store-installed nixgg + shims.
-- **No cmake / ninja wrappers** (`nix-cmake`, `nix-ninja`). The bash
-  version had these; wrappers are mostly shell glue that discover
-  build targets from the build tool's own introspection, so a Go port
-  is straightforward but hasn't happened yet.
+Produces a static 2.9 MB ELF plus `shims/` symlinks. Add `shims/`
+(and `bin/`) to PATH — `eval "$(nixgg env)"` does that.
