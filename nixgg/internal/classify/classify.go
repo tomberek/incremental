@@ -6,6 +6,9 @@
 //                (already realised; use the store path as a reference)
 //   - Thunk    → symlink resolves to .../thunks/<id>.nix
 //                (not yet realised; the link/ar thunk `import`s it)
+//   - Drv      → symlink resolves to /nix/store/…-tu-foo.o.drv
+//                (sandbox-mode: not yet realised; the link/ar drv
+//                references it via inputs.drvs)
 //   - Regular  → real file or symlink to something nixgg doesn't own
 //                (passthrough — link/ar can't include it in a thunk)
 //   - Absent   → the path doesn't exist at all
@@ -28,6 +31,7 @@ const (
 	Regular
 	Store
 	Thunk
+	Drv
 )
 
 func (k Kind) String() string {
@@ -40,6 +44,8 @@ func (k Kind) String() string {
 		return "store"
 	case Thunk:
 		return "thunk"
+	case Drv:
+		return "drv"
 	}
 	return "?"
 }
@@ -100,6 +106,14 @@ func Target(path, altStorePrefix string, l paths.Layout) Result {
 	canonical := dest
 	if altStorePrefix != "" && strings.HasPrefix(dest, altStorePrefix+"/nix/store/") {
 		canonical = strings.TrimPrefix(dest, altStorePrefix)
+	}
+	// Sandbox-mode: symlink → /nix/store/<hash>-<name>.drv. Reported
+	// as Drv so link/archive shims include it under inputs.drvs and
+	// reference it via the CA output placeholder. Must be checked
+	// BEFORE the generic /nix/store/ branch because .drv paths *are*
+	// under /nix/store.
+	if strings.HasPrefix(canonical, "/nix/store/") && strings.HasSuffix(canonical, ".drv") {
+		return Result{Kind: Drv, Ref: canonical}
 	}
 	if strings.HasPrefix(canonical, "/nix/store/") {
 		return Result{Kind: Store, Ref: storeRootOf(canonical)}

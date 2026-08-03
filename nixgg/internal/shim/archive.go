@@ -1,12 +1,14 @@
 package shim
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
 	"github.com/tbereknyei/nixgg/internal/classify"
 	"github.com/tbereknyei/nixgg/internal/expr"
 	"github.com/tbereknyei/nixgg/internal/paths"
+	"github.com/tbereknyei/nixgg/internal/sandbox"
 	"github.com/tbereknyei/nixgg/internal/storedeps"
 	"github.com/tbereknyei/nixgg/internal/thunk"
 	"github.com/tbereknyei/nixgg/internal/toolchain"
@@ -32,6 +34,7 @@ func Archive(args []string, cfg *toolchain.Config, l paths.Layout) error {
 
 	altPrefix := altStorePrefix(cfg.Store)
 	arInputs := make([]expr.Input, 0, len(inputs))
+	jsonInputs := make([]expr.JSONDrvInput, 0, len(inputs))
 	for _, in := range inputs {
 		c := classify.Target(in, altPrefix, l)
 		switch c.Kind {
@@ -39,9 +42,16 @@ func Archive(args []string, cfg *toolchain.Config, l paths.Layout) error {
 			arInputs = append(arInputs, expr.Input{
 				Kind: "store", Ref: c.Ref, Name: filepath.Base(in),
 			})
+			jsonInputs = append(jsonInputs, expr.JSONDrvInput{
+				Kind: "src", Ref: filepath.Base(c.Ref), Name: filepath.Base(in),
+			})
 		case classify.Thunk:
 			arInputs = append(arInputs, expr.Input{
 				Kind: "nix", Ref: c.Ref, Name: filepath.Base(in),
+			})
+		case classify.Drv:
+			jsonInputs = append(jsonInputs, expr.JSONDrvInput{
+				Kind: "drv", Ref: c.Ref, Name: filepath.Base(in),
 			})
 		default:
 			logf("ar passthrough: %s isn't a nixgg symlink (%s)", in, c.Kind)
@@ -57,6 +67,10 @@ func Archive(args []string, cfg *toolchain.Config, l paths.Layout) error {
 	// inputs + modifiers. Wrapper env still matters if any input was
 	// compiled with -fPIC / whatever, so we plumb it.
 	storeDeps := storedeps.From(nil, wrapperEnvJSON)
+
+	if sandbox.Enabled() {
+		return archiveSandbox(cfg, archive, modifiers, jsonInputs, storeDeps, wrapperEnvJSON)
+	}
 
 	e := expr.Archive(expr.ArchiveParams{
 		Helpers:        cfg.Helpers,
@@ -139,3 +153,56 @@ func isARModifiers(s string) bool {
 func realARFor(cfg *toolchain.Config) string {
 	return filepath.Join(filepath.Dir(cfg.RealCC), "ar")
 }
+
+// archiveSandbox handles NIXGG_SANDBOX=1: emit a JSON drv describing
+// this archive step, hand it to `nix derivation add`, symlink the
+// output at the returned drv path. Never submits — archives are
+// intermediate; only the link shim submits.
+func archiveSandbox(
+	cfg *toolchain.Config,
+	archive, modifiers string,
+	inputs []expr.JSONDrvInput,
+	storeDeps []string,
+	wrapperEnvJSON string,
+) error {
+	outName := filepath.Base(archive)
+	wrapperEnv, err := decodeStringMap(wrapperEnvJSON)
+	if err != nil {
+		return err
+	}
+	// `ar` lives in the same dir as the caller's real cc — that's the
+	// gcc-wrapper's binutils dependency.
+	arRoot := filepath.Dir(filepath.Dir(cfg.RealCC)) // strip /bin
+
+	drv := expr.ArchiveJSON(expr.ArchiveJSONParams{
+		Name:        "ar-" + outName,
+		OutName:     outName,
+		System:      cfg.System,
+		Bash:        cfg.BashRoot,
+		Coreutils:   cfg.CoreutilsRoot,
+		AR:          arRoot,
+		ARFlags:     modifiers,
+		Inputs:      inputs,
+		Placeholder: "/" + expr.OutPlaceholderNix32,
+		ExtraSrcs: []string{
+			baseNameOf(cfg.BashRoot),
+			baseNameOf(cfg.CoreutilsRoot),
+			baseNameOf(arRoot),
+		},
+		Env: wrapperEnv,
+	})
+	for _, sd := range storeDeps {
+		drv.Inputs.Srcs = append(drv.Inputs.Srcs, baseNameOf(sd))
+	}
+	drvPath, err := sandbox.DerivationAdd(cfg, drv)
+	if err != nil {
+		return err
+	}
+	if err := sandbox.PointOutputAtDrv(archive, drvPath); err != nil {
+		return err
+	}
+	logf("  drv:        %s", drvPath)
+	return nil
+}
+
+var _ = fmt.Sprintf // keep import; used only when sandbox path is compiled

@@ -11,6 +11,7 @@ import (
 	"github.com/tbereknyei/nixgg/internal/expr"
 	"github.com/tbereknyei/nixgg/internal/paths"
 	"github.com/tbereknyei/nixgg/internal/realise"
+	"github.com/tbereknyei/nixgg/internal/sandbox"
 	"github.com/tbereknyei/nixgg/internal/storedeps"
 	"github.com/tbereknyei/nixgg/internal/thunk"
 	"github.com/tbereknyei/nixgg/internal/toolchain"
@@ -45,6 +46,7 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 	// Classify each input.
 	altPrefix := altStorePrefix(cfg.Store)
 	linkInputs := make([]expr.Input, 0, len(inputs))
+	jsonInputs := make([]expr.JSONDrvInput, 0, len(inputs))
 	for _, in := range inputs {
 		c := classify.Target(in, altPrefix, l)
 		switch c.Kind {
@@ -52,9 +54,18 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 			linkInputs = append(linkInputs, expr.Input{
 				Kind: "store", Ref: c.Ref, Name: filepath.Base(in),
 			})
+			jsonInputs = append(jsonInputs, expr.JSONDrvInput{
+				Kind: "src", Ref: filepath.Base(c.Ref), Name: filepath.Base(in),
+			})
 		case classify.Thunk:
 			linkInputs = append(linkInputs, expr.Input{
 				Kind: "nix", Ref: c.Ref, Name: filepath.Base(in),
+			})
+		case classify.Drv:
+			// Sandbox-mode input: previous shim produced a .drv here.
+			// Only meaningful when we're also in sandbox mode.
+			jsonInputs = append(jsonInputs, expr.JSONDrvInput{
+				Kind: "drv", Ref: c.Ref, Name: filepath.Base(in),
 			})
 		default:
 			logf("link passthrough: %s isn't a nixgg symlink (%s)", in, c.Kind)
@@ -67,6 +78,11 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 		return err
 	}
 	storeDeps := storedeps.From(flags, wrapperEnvJSON)
+
+	// Sandbox mode: emit JSON, submit as this outer derivation's output.
+	if sandbox.Enabled() {
+		return linkSandbox(cfg, tool, output, jsonInputs, flags, storeDeps, wrapperEnvJSON)
+	}
 
 	e := expr.Link(expr.LinkParams{
 		Helpers:        cfg.Helpers,
@@ -167,6 +183,94 @@ func joinBase(inputs []string) string {
 		b.WriteString(filepath.Base(in))
 	}
 	return b.String()
+}
+
+// linkSandbox handles NIXGG_SANDBOX=1: emit a JSON drv describing
+// this link, hand it to `nix derivation add`, and submit the returned
+// .drv as the current outer derivation's output.
+//
+// Every link in a sandbox is a candidate final output. That's fine —
+// nix store submit-output only allows one submission per output name,
+// so a build with multiple links must arrange for only one to be
+// "the" output (via NIXGG_SANDBOX_TARGET, matched against the -o
+// output). Other link steps just add their drvs to the store without
+// submitting; the consumer's `builtins.outputOf` reaches them
+// transitively through the target's inputs.drvs.
+func linkSandbox(
+	cfg *toolchain.Config,
+	tool dispatch.Tool,
+	output string,
+	inputs []expr.JSONDrvInput,
+	flags []string,
+	storeDeps []string,
+	wrapperEnvJSON string,
+) error {
+	outName := filepath.Base(output)
+	wrapperEnv, err := decodeStringMap(wrapperEnvJSON)
+	if err != nil {
+		return err
+	}
+	drv := expr.LinkJSON(expr.LinkJSONParams{
+		Name:        "bin-" + outName,
+		OutName:     outName,
+		System:      cfg.System,
+		Bash:        cfg.BashRoot,
+		Coreutils:   cfg.CoreutilsRoot,
+		Compiler:    cfg.CompilerRoot,
+		Tool:        tool.Basename(),
+		Inputs:      inputs,
+		Flags:       flags,
+		Placeholder: "/" + expr.OutPlaceholderNix32,
+		ExtraSrcs: []string{
+			baseNameOf(cfg.BashRoot),
+			baseNameOf(cfg.CoreutilsRoot),
+			baseNameOf(cfg.CompilerRoot),
+		},
+		Env: wrapperEnv,
+	})
+	for _, sd := range storeDeps {
+		drv.Inputs.Srcs = append(drv.Inputs.Srcs, baseNameOf(sd))
+	}
+
+	drvPath, err := sandbox.DerivationAdd(cfg, drv)
+	if err != nil {
+		return err
+	}
+	if err := sandbox.PointOutputAtDrv(output, drvPath); err != nil {
+		return err
+	}
+	logf("  drv:        %s", drvPath)
+
+	// Submit if this matches the caller's declared target. NIXGG_SANDBOX_TARGET
+	// holds the abs or basename path the outer build wants exposed as `out`.
+	// If unset, we submit every link (last-write-wins from Nix's perspective,
+	// which will error on the second submit).
+	target := os.Getenv("NIXGG_SANDBOX_TARGET")
+	if target == "" || matchesTarget(target, output) {
+		if err := sandbox.SubmitOutput(cfg, drvPath, "out"); err != nil {
+			// Second-submit error is not fatal on projects that link
+			// helper binaries then the "real" one: emit a warning.
+			logf("  submit-output: %v", err)
+		} else {
+			logf("  submitted: %s", drvPath)
+		}
+	}
+	return nil
+}
+
+// matchesTarget returns true if `target` (which may be a basename,
+// a relative path, or an absolute path) refers to `output`.
+func matchesTarget(target, output string) bool {
+	if target == output {
+		return true
+	}
+	if abs, err := filepath.Abs(output); err == nil && target == abs {
+		return true
+	}
+	if filepath.Base(target) == filepath.Base(output) {
+		return true
+	}
+	return false
 }
 
 var _ = fmt.Sprintf // silence unused-import warning if fmt goes away later

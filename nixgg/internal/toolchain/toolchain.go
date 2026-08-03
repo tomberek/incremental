@@ -10,7 +10,24 @@ package toolchain
 import (
 	"fmt"
 	"os"
+	"runtime"
 )
+
+// defaultSystem returns the Nix "system" string matching this Go
+// binary's build target. Works for the two we care about now.
+func defaultSystem() string {
+	switch runtime.GOOS + "/" + runtime.GOARCH {
+	case "linux/amd64":
+		return "x86_64-linux"
+	case "linux/arm64":
+		return "aarch64-linux"
+	case "darwin/amd64":
+		return "x86_64-darwin"
+	case "darwin/arm64":
+		return "aarch64-darwin"
+	}
+	return runtime.GOARCH + "-" + runtime.GOOS
+}
 
 // Config holds the pinned nixgg toolchain roots.
 type Config struct {
@@ -37,6 +54,11 @@ type Config struct {
 	// The alt store URL (`local?root=…` or `auto`). Passed via
 	// NIX_CONFIG when we invoke `nix build`.
 	Store string
+
+	// Nix "system" string for JSON drvs we emit in sandbox mode
+	// (e.g. "x86_64-linux"). Defaults to $NIXGG_SYSTEM, else falls
+	// back to a compile-time constant matching this build.
+	System string
 }
 
 // FromEnv reads the NIXGG_* variables. Returns an error listing every
@@ -51,6 +73,10 @@ func FromEnv() (*Config, error) {
 		Helpers:       os.Getenv("NIXGG_NIX_HELPERS"),
 		Nix:           os.Getenv("NIXGG_NIX"),
 		Store:         os.Getenv("NIXGG_STORE"),
+		System:        os.Getenv("NIXGG_SYSTEM"),
+	}
+	if c.System == "" {
+		c.System = defaultSystem()
 	}
 	var missing []string
 	if c.RealCC == "" {

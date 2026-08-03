@@ -9,6 +9,7 @@
 package shim
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,6 +20,7 @@ import (
 	"github.com/tbereknyei/nixgg/internal/expr"
 	"github.com/tbereknyei/nixgg/internal/mode"
 	"github.com/tbereknyei/nixgg/internal/paths"
+	"github.com/tbereknyei/nixgg/internal/sandbox"
 	"github.com/tbereknyei/nixgg/internal/scan"
 	"github.com/tbereknyei/nixgg/internal/stage"
 	"github.com/tbereknyei/nixgg/internal/storedeps"
@@ -131,6 +133,14 @@ func Compile(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.L
 		return realiseAndLink(e, output, cfg, l)
 	}
 
+	// Sandbox mode: submit a JSON drv directly to the outer daemon,
+	// symlink the output at the returned drv path. No .nix thunk on
+	// disk. Downstream link/archive shims will resolve this via
+	// classify.Drv and reference it in inputs.drvs.
+	if sandbox.Enabled() {
+		return compileSandbox(cfg, l, tool, tuID, filepath.Base(output), output, srcRel, sandboxFlags, storeDeps, wrapperEnvJSON)
+	}
+
 	id := thunk.Compute(e)
 	thunkPath, err := thunk.Write(l, id, e)
 	if err != nil {
@@ -144,6 +154,104 @@ func Compile(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.L
 	}
 	logf("  thunk:      %s", thunkPath)
 	return nil
+}
+
+// compileSandbox handles NIXGG_SANDBOX=1: emit a JSON drv describing
+// this compile, hand it to `nix derivation add`, symlink the output
+// at the returned drv path.
+//
+// The staged src tree lives at l.Srcs/<tuID> on disk. In sandbox
+// mode we still write it there (via stage.Sources earlier), then
+// upload it to the store via `nix store add --scan` so the resulting
+// store path is a self-contained input. See #14.
+func compileSandbox(
+	cfg *toolchain.Config, l paths.Layout,
+	tool dispatch.Tool, tuID, outName, output, srcRel string,
+	flags []string, storeDeps []string, wrapperEnvJSON string,
+) error {
+	// 1. Upload the staged src tree to the store.
+	srcStore, err := sandbox.StoreAddScan(cfg, "src-"+outName, filepath.Join(l.Srcs, tuID))
+	if err != nil {
+		return fmt.Errorf("stage src to store: %w", err)
+	}
+
+	// 2. Resolve toolchain roots for the drv. cfg carries the store
+	// paths we bootstrapped from NIXGG_COMPILER_ROOT / _BASH_ROOT /
+	// _COREUTILS_ROOT.
+	bash := cfg.BashRoot
+	coreutils := cfg.CoreutilsRoot
+	compiler := cfg.CompilerRoot
+
+	// 3. Compute the drv's own $out placeholder. `builtins.placeholder
+	// "out"` is sha256("nix-output:out") base32'd. Every derivation
+	// gets the same value; the caOutputPlaceholder we compute for
+	// referring downstream is different.
+	outPlaceholder := "/" + expr.OutPlaceholderNix32
+
+	// 4. Decode wrapper env (JSON object) into map for JSONDrv.env.
+	wrapperEnv, err := decodeStringMap(wrapperEnvJSON)
+	if err != nil {
+		return err
+	}
+
+	// 5. Assemble the JSON drv.
+	drv := expr.CompileJSON(expr.CompileJSONParams{
+		Name:        "tu-" + outName,
+		OutName:     outName,
+		System:      cfg.System,
+		Bash:        bash,
+		Coreutils:   coreutils,
+		Compiler:    compiler,
+		Tool:        tool.Basename(),
+		SrcStore:    srcStore,
+		Source:      srcRel,
+		Flags:       flags,
+		Placeholder: outPlaceholder,
+		Srcs: []string{
+			baseNameOf(bash),
+			baseNameOf(coreutils),
+			baseNameOf(compiler),
+			baseNameOf(srcStore),
+		},
+		Env: wrapperEnv,
+	})
+	// storeDeps: additional store paths referenced by flags/env
+	// (from storedeps.From). Add them to inputs.srcs so the sandbox
+	// mounts them.
+	for _, sd := range storeDeps {
+		drv.Inputs.Srcs = append(drv.Inputs.Srcs, baseNameOf(sd))
+	}
+
+	drvPath, err := sandbox.DerivationAdd(cfg, drv)
+	if err != nil {
+		return err
+	}
+	if err := sandbox.PointOutputAtDrv(output, drvPath); err != nil {
+		return err
+	}
+	logf("  drv:        %s", drvPath)
+	return nil
+}
+
+// decodeStringMap parses `{"K1": "V1", ...}` into a Go map.
+func decodeStringMap(s string) (map[string]string, error) {
+	if s == "" || s == "{}" {
+		return nil, nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		return nil, fmt.Errorf("decode wrapperEnv: %w", err)
+	}
+	return m, nil
+}
+
+// baseNameOf strips the /nix/store/ prefix so we get a hash+name
+// basename suitable for a JSONDrv.Inputs.Srcs entry.
+func baseNameOf(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[i+1:]
+	}
+	return p
 }
 
 // parseCompileArgs identifies the source + output + non-path flags.

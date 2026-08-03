@@ -324,6 +324,81 @@ type JSONDrvInput struct {
 	Name string
 }
 
+// ArchiveJSONParams is the sandbox-mode analog of ArchiveParams.
+type ArchiveJSONParams struct {
+	Name        string
+	OutName     string
+	System      string
+	Bash        string
+	Coreutils   string
+	AR          string // full /nix/store/... path to gnu binutils (for `ar`)
+	ARFlags     string // e.g. "rcs"
+	Inputs      []JSONDrvInput
+	Placeholder string
+	ExtraSrcs   []string
+	Env         map[string]string
+}
+
+// ArchiveJSON produces a JSONDrv for an ar step.
+func ArchiveJSON(p ArchiveJSONParams) JSONDrv {
+	env := map[string]string{
+		"out":    p.Placeholder,
+		"name":   p.Name,
+		"system": p.System,
+	}
+	for k, v := range p.Env {
+		env[k] = v
+	}
+	drvs := map[string]JSONDrvRef{}
+	srcs := append([]string(nil), p.ExtraSrcs...)
+	seen := map[string]bool{}
+	for _, s := range srcs {
+		seen[s] = true
+	}
+	inputRefs := make([]string, 0, len(p.Inputs))
+	for _, in := range p.Inputs {
+		switch in.Kind {
+		case "drv":
+			ref := drvs[in.Ref]
+			ref.Outputs = appendUnique(ref.Outputs, "out")
+			drvs[in.Ref] = ref
+			ph := caOutputPlaceholder(in.Ref, "out")
+			inputRefs = append(inputRefs, fmt.Sprintf("'%s/%s'", ph, in.Name))
+		case "src":
+			if !seen[in.Ref] {
+				srcs = append(srcs, in.Ref)
+				seen[in.Ref] = true
+			}
+			inputRefs = append(inputRefs, fmt.Sprintf("'/nix/store/%s/%s'", in.Ref, in.Name))
+		}
+	}
+	script := fmt.Sprintf(
+		`set -euo pipefail
+export PATH="%s/bin:%s/bin"
+mkdir -p "$out"
+"%s/bin/ar" '%s' "$out/%s" %s
+`,
+		p.Coreutils, p.AR,
+		p.AR, p.ARFlags, p.OutName,
+		strings.Join(inputRefs, " "),
+	)
+	return JSONDrv{
+		Name:    p.Name,
+		System:  p.System,
+		Builder: p.Bash + "/bin/bash",
+		Args:    []string{"-c", script},
+		Env:     env,
+		Inputs: JSONDrvInputs{
+			Drvs: drvs,
+			Srcs: srcs,
+		},
+		Outputs: map[string]JSONOut{
+			"out": {Method: "nar", HashAlgo: "sha256"},
+		},
+		Version: 4,
+	}
+}
+
 // LinkJSON produces a JSONDrv for a link step.
 func LinkJSON(p LinkJSONParams) JSONDrv {
 	env := map[string]string{
@@ -434,6 +509,18 @@ func caOutputPlaceholder(drvPath, output string) string {
 // storeHashLen is the number of Nix32 characters in the hash prefix
 // of a store-path basename. Nix's internal constant is `HashLen = 32`.
 const storeHashLen = 32
+
+// OutPlaceholderNix32 is the Nix32-encoded sha256 of "nix-output:out"
+// — the string Nix substitutes for a placeholder-`$out` reference at
+// build time. Since every derivation with a single "out" output
+// uses the same placeholder, we hardcode it. Verified:
+//
+//	nix eval --raw --expr 'builtins.placeholder "out"'
+//	=> /1rz4g4znpzjwh1xymhjpm42vipw92pr73vdgl6xs1hycac8kf2n9
+//
+// (The leading '/' is the placeholder prefix; drop it if you need
+// the bare digest.)
+const OutPlaceholderNix32 = "1rz4g4znpzjwh1xymhjpm42vipw92pr73vdgl6xs1hycac8kf2n9"
 
 // nix32Chars is the alphabet used by Nix's base32 encoding. Copied
 // verbatim from NixOS/nix src/libutil/include/nix/util/base-nix-32.hh
