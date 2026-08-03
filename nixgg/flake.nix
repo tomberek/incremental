@@ -185,9 +185,15 @@
           # is the resolved final artifact — `builtins.outputOf`
           # applied to the outer text-mode drv — so consumers see a
           # normal store path, not a .drv.
+          # `.#hello` builds the two-file project in nixgg/example/
+          # through the sandbox / dyn-drv path. The exact same source
+          # can also be built natively via `cd nixgg/example && make`
+          # inside `nix develop /path/to/nixgg`; the resulting drvs
+          # (compile drvs for main.o + util.o, link drv for hello)
+          # are byte-identical between the two modes.
           hello = (import ./dyn-drv/hello-mkbuild.nix {
             inherit mkNixggBuild;
-            inherit (pkgs) runCommand;
+            inherit (pkgs) lib;
           }).result;
 
           lua = (import ./dyn-drv/lua-mkbuild.nix {

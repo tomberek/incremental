@@ -1,47 +1,45 @@
-# Smoke test: build hello.cc through mkNixggBuild.
+# Build nixgg/example/ through mkNixggBuild (sandbox / dyn-drv mode).
 #
-# Consumer view: `nix build .#hello` produces the compiled binary
-# in the store, invisible to the caller whether one drv or ten got
-# involved.
+# THIS IS THE SAME SOURCE the native path uses. Steps to see the two
+# paths are equivalent:
 #
-# Under the hood: the outer .drv-producing derivation runs a
-# compile+link inside builder-rpc-v0. Compile shim emits one JSON
-# drv per TU (here: one, for hello.cc → hello.o). Link shim emits
-# its own JSON drv and calls submit-output. Consumer resolves via
-# builtins.outputOf.
+#   # native:
+#   cd nixgg/example
+#   nix develop /path/to/nixgg -c bash -c 'NIXGG_AUTOFORCE=0 make'
+#   # inspect .nixgg/thunks/*.nix → drv paths
+#
+#   # sandbox:
+#   nix build /path/to/nixgg#hello --no-eval-cache
+#   # inspect the drv chain: compile drvs land at the same store
+#   # paths, link drv lands at the same store path.
+#
+# The mkNixggBuild wrapper adds one outer .drv.drv derivation (the
+# text-mode "produce a drv" step) but every derivation inside is
+# byte-identical to the native path.
 {
   mkNixggBuild,
-  runCommand,
+  lib,
 }:
 
 let
-  # Source is embedded so this file doesn't depend on paths outside
-  # the flake root (which would make `nix build .#hello` complain
-  # about impurity).
-  helloSrc = builtins.toFile "hello.cc" ''
-    #include <cstdio>
-
-    int main() {
-      std::printf("Hello from a nixgg dyn-drv build!\n");
-      return 0;
-    }
-  '';
-
-  # mkNixggBuild expects `src` to be a directory. Wrap the single
-  # .cc file into a one-file tree.
-  helloTree = runCommand "hello-src" { } ''
-    mkdir -p $out
-    cp ${helloSrc} $out/hello.cc
-  '';
+  # Cherry-pick the four example files: main.cc, util.cc, util.h,
+  # Makefile. Using `../example` directly would drag the whole nixgg
+  # tree into the store; filter narrows it.
+  exampleSrc = lib.cleanSourceWith {
+    src = ./../example;
+    filter = path: type:
+      let name = baseNameOf path; in
+      name == "main.cc" || name == "util.cc" || name == "util.h"
+      || name == "Makefile";
+  };
 in
 
 mkNixggBuild {
   pname = "hello";
   version = "0";
-  src = helloTree;
+  src = exampleSrc;
   target = "hello";
-  buildCommand = ''
-    c++ -O2 -c hello.cc -o hello.o
-    c++ hello.o -o hello
-  '';
+  # Same Makefile the native path uses. No divergent build script —
+  # if it produces different drvs, that's a real bug in nixgg.
+  buildCommand = "make";
 }
