@@ -393,7 +393,17 @@
             for p in "''${parts[@]}"; do nixList+=" \"$p\""; done
             nixList+=" ]"
             expr="let pkg = builtins.foldl' (acc: a: acc.\''${a}) (builtins.getFlake \"$flakeRef\") $nixList; in pkg.withCache \"$cacheRef\""
-            exec ${pkgs.nix}/bin/nix build --expr "$expr" "$@"
+            log=$(mktemp)
+            trap 'rm -f "$log"' EXIT
+            set +e
+            ${pkgs.nix}/bin/nix build --expr "$expr" "$@" 2> >(tee "$log" >&2)
+            status=$?
+            set -e
+            if [ "$status" -ne 0 ] && grep -q "unlocked flake reference" "$log"; then
+              echo "" >&2
+              echo "hint: withCache needs a rev-pinned ref, e.g. add ?rev=\$(git -C <repo> rev-parse HEAD) to whichever ref above is unlocked." >&2
+            fi
+            exit "$status"
           ''}";
         };
       }) inputs.nixpkgs.legacyPackages;
