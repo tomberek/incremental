@@ -361,23 +361,33 @@
       # Wraps `nix build --expr '(builtins.getFlake ...).<attrpath>.withCache "<cacheRef>"'`
       # so a third party can restore from a prior build without --impure or
       # editing their own flake.nix — `withCache` needs a rev-pinned ref, so
-      # this stays pure eval.
+      # that inner eval stays pure. A bare `<flake-ref>#name` (no dots)
+      # expands to `packages.<system>.name`, matching `nix build`'s own
+      # shorthand; a dotted path (e.g. `checks.x86_64-linux.foo`) is used
+      # as given.
       apps = builtins.mapAttrs (system: pkgs: {
         with-cache = {
           type = "app";
           program = "${pkgs.writeShellScript "with-cache" ''
             set -euo pipefail
             if [ "$#" -lt 2 ]; then
-              echo "usage: with-cache <flake-ref>#<attrpath> <cache-flake-ref> [nix build args...]" >&2
+              echo "usage: with-cache <flake-ref>#<name-or-attrpath> <cache-flake-ref> [nix build args...]" >&2
               exit 1
             fi
             target="$1"; cacheRef="$2"; shift 2
             flakeRef="''${target%%#*}"
             attrPathStr="''${target#*#}"
             if [ "$flakeRef" = "$target" ]; then
-              echo "error: target must be <flake-ref>#<attrpath>" >&2
+              echo "error: target must be <flake-ref>#<name-or-attrpath>" >&2
               exit 1
             fi
+            case "$attrPathStr" in
+              *.*) ;; # already a full attrpath, e.g. checks.x86_64-linux.foo
+              *)
+                system=$(${pkgs.nix}/bin/nix eval --impure --raw --expr builtins.currentSystem)
+                attrPathStr="packages.$system.$attrPathStr"
+                ;;
+            esac
             IFS='.' read -r -a parts <<< "$attrPathStr"
             nixList="["
             for p in "''${parts[@]}"; do nixList+=" \"$p\""; done

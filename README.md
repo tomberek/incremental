@@ -43,13 +43,16 @@ returns the same package restoring from that build instead — no
 $ nix build .#default   # also produces .#default.incremental
 echo "// x" >> main.go
 $ nix run github:tomberek/incremental#with-cache -- \
-    "git+file://$PWD?rev=HEAD#packages.x86_64-linux.default" \
+    "git+file://$PWD?rev=HEAD#default" \
     "git+file://$PWD?rev=<pre-edit-commit>"
 ```
 
 `withCache` requires a rev-pinned ref (`?rev=<sha>`, not `?ref=HEAD` or a
 branch name) — `builtins.getFlake` only resolves locked refs under pure
-eval, so this needs no `--impure`.
+eval, so this needs no `--impure`. A bare name after `#` (like `default`
+above) expands to `packages.<current-system>.default`, matching `nix
+build`'s own shorthand; use a full dotted path (e.g.
+`checks.x86_64-linux.foo`) for anything else.
 
 The `with-cache` app is just this, spelled without `--impure --expr`:
 
