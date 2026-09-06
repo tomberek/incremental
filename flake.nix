@@ -149,6 +149,68 @@
           });
         };
 
+      # buildGoModule's own configurePhase sets $GOCACHE and only then
+      # runs postConfigure — mkIncrementalPackage's `phase` argument must
+      # be exactly that hook, so bake it in rather than making every
+      # caller rediscover it.
+      mkIncrementalGoPackage =
+        {
+          name,
+          system,
+          pkgs,
+          drv,
+          cache ? inputs.cache,
+          nuke ? true,
+          keepIncremental ? !(cache ? packages),
+          extraPostInstall ? (_: ""),
+        }:
+        mkIncrementalPackage {
+          inherit
+            name
+            system
+            pkgs
+            drv
+            cache
+            nuke
+            keepIncremental
+            extraPostInstall
+            ;
+          cacheVars = [ "GOCACHE" ];
+          phase = "postConfigure";
+        };
+
+      # zig.hook's zigConfigurePhase only ever reassigns
+      # ZIG_GLOBAL_CACHE_DIR, never ZIG_LOCAL_CACHE_DIR — so both must be
+      # exported before configurePhase runs, i.e. in preConfigure.
+      mkIncrementalZigPackage =
+        {
+          name,
+          system,
+          pkgs,
+          drv,
+          cache ? inputs.cache,
+          nuke ? true,
+          keepIncremental ? !(cache ? packages),
+          extraPostInstall ? (_: ""),
+        }:
+        mkIncrementalPackage {
+          inherit
+            name
+            system
+            pkgs
+            drv
+            cache
+            nuke
+            keepIncremental
+            extraPostInstall
+            ;
+          cacheVars = [
+            "ZIG_LOCAL_CACHE_DIR"
+            "ZIG_GLOBAL_CACHE_DIR"
+          ];
+          phase = "preConfigure";
+        };
+
       # Shared ccache env/report shell.
       ccacheEnv =
         { pkgs, pname, dir, debugDir }:
@@ -346,6 +408,8 @@
           mkIncremental
           mkIncrementalPackage
           mkIncrementalAutotoolsPackage
+          mkIncrementalGoPackage
+          mkIncrementalZigPackage
           ccacheEnv
           mkIncrementalCcachePackage
           mkIncrementalNixComponents
@@ -459,11 +523,9 @@
             in
             mkHelloCcache inputs.cache;
 
-          golang = mkIncrementalPackage {
+          golang = mkIncrementalGoPackage {
             name = "golang";
             inherit system pkgs;
-            cacheVars = [ "GOCACHE" ];
-            phase = "postConfigure";
             drv = pkgs.buildGoModule {
               name = "golang";
               src = pkgs.lib.cleanSource ./golang;
@@ -497,14 +559,9 @@
             };
           };
 
-          zig = mkIncrementalPackage {
+          zig = mkIncrementalZigPackage {
             name = "zig";
             inherit system pkgs;
-            cacheVars = [
-              "ZIG_LOCAL_CACHE_DIR"
-              "ZIG_GLOBAL_CACHE_DIR"
-            ];
-            phase = "preConfigure";
             drv = pkgs.stdenvNoCC.mkDerivation {
               name = "zig";
               src = pkgs.lib.cleanSource ./zig;

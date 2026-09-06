@@ -23,12 +23,10 @@ returns the same package restoring from that build instead — no
   outputs = { self, nixpkgs, incremental, ... }:
     let pkgs = nixpkgs.legacyPackages.x86_64-linux;
     in {
-      packages.x86_64-linux.default = incremental.lib.mkIncrementalPackage {
+      packages.x86_64-linux.default = incremental.lib.mkIncrementalGoPackage {
         name = "myapp";
         system = "x86_64-linux";
         inherit pkgs; # supplies nuke-refs
-        cacheVars = [ "GOCACHE" ];
-        phase = "postConfigure";
         drv = pkgs.buildGoModule {
           pname = "myapp";
           src = ./.;
@@ -63,12 +61,20 @@ nix build --expr \
    in pkg.withCache "<cache-flake-ref>"'
 ```
 
-For anything ccache alone doesn't cover — autoconf's `--cache-file`,
-a second cache like Go's module cache — compose
-`mkIncrementalPackage`/`mkIncrementalAutotoolsPackage` directly, or see
-the worked examples below.
+`mkIncrementalGoPackage` and `mkIncrementalZigPackage` bake in the
+right `cacheVars`/`phase` for those ecosystems (see "Examples in this
+repo" below for why each needs what it needs). For anything else —
+autoconf's `--cache-file`, a second cache tool doesn't have a wrapper
+for — compose `mkIncrementalPackage`/`mkIncrementalAutotoolsPackage`
+directly.
 
 ## Examples in this repo
+
+### Go
+
+Uses `mkIncrementalGoPackage`: `buildGoModule`'s own `configurePhase`
+sets `$GOCACHE` and only then runs `postConfigure`, so that's the
+hook `GOCACHE` gets pointed at the restored cache from.
 
 ```
 $ nix build .#golang
@@ -77,6 +83,10 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#golang
 ```
 
 ### Zig
+
+Uses `mkIncrementalZigPackage`: `zig.hook`'s `zigConfigurePhase`
+reassigns `ZIG_GLOBAL_CACHE_DIR` but never `ZIG_LOCAL_CACHE_DIR`, so
+both vars are exported earlier, in `preConfigure`.
 
 ```
 $ nix build .#zig
