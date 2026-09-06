@@ -4,13 +4,76 @@ Reuse outputs/caches from a previous build by overriding the `cache`
 flake input to an earlier checkout (or a previous build, or whatever
 ref you want).
 
+## Using this as a library from another flake
+
+`inputs.cache`/`--override-input` requires the flake being built to declare
+`cache` as an input — fine for packages that live in this repo, but it means
+a third party has to edit their own `flake.nix` to opt in.
+
+Every `mkIncrementalPackage`-based derivation also carries
+`passthru.withCache`, a plain function that takes a rev-pinned flake ref and
+returns the same package restoring from that build instead — no
+`--override-input`, no changes to the caller's `flake.nix`:
+
+```nix
+# their flake.nix — no inputs.cache, no other changes needed
+{
+  inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+  inputs.incremental.url = "github:tomberek/incremental";
+  outputs = { self, nixpkgs, incremental, ... }:
+    let pkgs = nixpkgs.legacyPackages.x86_64-linux;
+    in {
+      packages.x86_64-linux.default = incremental.lib.mkIncrementalPackage {
+        name = "myapp";
+        system = "x86_64-linux";
+        inherit pkgs; # supplies nuke-refs
+        cacheVars = [ "GOCACHE" ];
+        phase = "postConfigure";
+        drv = pkgs.buildGoModule {
+          pname = "myapp";
+          src = ./.;
+          vendorHash = "...";
+        };
+      };
+    };
+}
+```
+
+```
+$ nix build .#default   # also produces .#default.incremental
+echo "// x" >> main.go
+$ nix run github:tomberek/incremental#with-cache -- \
+    "git+file://$PWD?rev=HEAD#packages.x86_64-linux.default" \
+    "git+file://$PWD?rev=<pre-edit-commit>"
+```
+
+`withCache` requires a rev-pinned ref (`?rev=<sha>`, not `?ref=HEAD` or a
+branch name) — `builtins.getFlake` only resolves locked refs under pure
+eval, so this needs no `--impure`.
+
+The `with-cache` app is just this, spelled without `--impure --expr`:
+
+```
+nix build --expr \
+  'let pkg = builtins.foldl'"'"' (acc: a: acc.${a})
+       (builtins.getFlake "<flake-ref>") ["packages" "x86_64-linux" "default"];
+   in pkg.withCache "<cache-flake-ref>"'
+```
+
+For anything ccache alone doesn't cover — autoconf's `--cache-file`,
+a second cache like Go's module cache — compose
+`mkIncrementalPackage`/`mkIncrementalAutotoolsPackage` directly, or see
+the worked examples below.
+
+## Examples in this repo
+
 ```
 $ nix build .#golang
 echo "// hi" >> golang/main.go
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#golang
 ```
 
-## Zig
+### Zig
 
 ```
 $ nix build .#zig
@@ -18,7 +81,7 @@ echo "// hi" >> zig/main.zig
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#zig
 ```
 
-## ccache (hello-ccache)
+### ccache (hello-ccache)
 
 ```
 $ nix build .#hello-ccache
@@ -29,7 +92,7 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#hello-ccache
 `--cache-file`: `nix build -L` shows `configure: loading cache
 .../config.cache`, plus a ccache hit rate on rebuild.
 
-## Adding a new ccache-cached package
+### Adding a new ccache-cached package
 
 `mkIncrementalCcachePackage` is the one-call-site way to add ccache
 caching to a C/C++ package. `c/` is a minimal worked example:
@@ -63,11 +126,7 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#c
   skips — e.g. `preConfigure` lives inside `configurePhase`, so
   `dontConfigure = true` skips both. `postPatch` always runs.
 
-For anything ccache alone doesn't cover — autoconf's `--cache-file`,
-a second cache like Go's module cache — compose
-`mkIncrementalPackage`/`mkIncrementalAutotoolsPackage` directly.
-
-## NixOS/nix itself (nix-incremental)
+### NixOS/nix itself (nix-incremental)
 
 `github:NixOS/nix`'s flake splits `nix` into ~14 Meson/Ninja component
 derivations (`nix-util`, `nix-store`, `nix-expr`, ...) sharing a scope
@@ -164,62 +223,6 @@ strings, e.g. gnulib's `git-version-gen`).
 
 For compile-level caching beyond `config.cache`, use `ccacheStdenv`
 rather than trying to skip `./configure`.
-
-## Using this as a library from another flake
-
-`inputs.cache`/`--override-input` requires the flake being built to declare
-`cache` as an input — fine for packages that live in this repo, but it means
-a third party has to edit their own `flake.nix` to opt in.
-
-Every `mkIncrementalPackage`-based derivation also carries
-`passthru.withCache`, a plain function that takes a rev-pinned flake ref and
-returns the same package restoring from that build instead — no
-`--override-input`, no changes to the caller's `flake.nix`:
-
-```nix
-# their flake.nix — no inputs.cache, no other changes needed
-{
-  inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
-  inputs.incremental.url = "github:tomberek/incremental";
-  outputs = { self, nixpkgs, incremental, ... }:
-    let pkgs = nixpkgs.legacyPackages.x86_64-linux;
-    in {
-      packages.x86_64-linux.default = incremental.lib.mkIncrementalPackage {
-        name = "myapp";
-        system = "x86_64-linux";
-        inherit pkgs; # supplies nuke-refs
-        cacheVars = [ "GOCACHE" ];
-        phase = "postConfigure";
-        drv = pkgs.buildGoModule {
-          pname = "myapp";
-          src = ./.;
-          vendorHash = "...";
-        };
-      };
-    };
-}
-```
-
-```
-$ nix build .#default   # also produces .#default.incremental
-echo "// x" >> main.go
-$ nix run github:tomberek/incremental#with-cache -- \
-    "git+file://$PWD?rev=HEAD#packages.x86_64-linux.default" \
-    "git+file://$PWD?rev=<pre-edit-commit>"
-```
-
-`withCache` requires a rev-pinned ref (`?rev=<sha>`, not `?ref=HEAD` or a
-branch name) — `builtins.getFlake` only resolves locked refs under pure
-eval, so this needs no `--impure`.
-
-The `with-cache` app is just this, spelled without `--impure --expr`:
-
-```
-nix build --expr \
-  'let pkg = builtins.foldl'"'"' (acc: a: acc.${a})
-       (builtins.getFlake "<flake-ref>") ["packages" "x86_64-linux" "default"];
-   in pkg.withCache "<cache-flake-ref>"'
-```
 
 ## Checks
 
