@@ -34,6 +34,47 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#hello-ccache
 `--cache-file`. `nix build -L` shows `configure: loading cache
 .../config.cache` and a ccache hit rate on rebuild.
 
+## NixOS/nix itself (nix-incremental)
+
+`github:NixOS/nix`'s flake splits the `nix` package into ~14
+Meson/Ninja component derivations (`nix-util`, `nix-store`,
+`nix-expr`, ...) rather than one monolithic build. Its flake exposes
+`nix.lib.makeComponents` + `overrideAllMesonComponents`, an
+overlay-shaped seam applied to every component transitively —
+building `nix-cli` also applies it to everything underneath. This
+repo's `mkIncrementalNixComponents` (in `flake.nix`) uses that seam to
+give every component its own restored ccache dir, the same as
+`hello-ccache`.
+
+```
+$ nix build .#nix-incremental
+# edit a .cc file under a local NixOS/nix checkout, or just rebuild as-is
+$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nix-incremental
+```
+
+Each component (`nix-util`, `nix-store`, `nix-fetchers`, `nix-expr`,
+`nix-flake`, `nix-main`, `nix-cmd`, and their `-c` C-API variants) is
+also exposed as its own top-level package, since
+`mkIncrementalNixComponents` restores each one's cache independently
+— `nix build .#nix-util` works standalone.
+
+Two adjustments from NixOS/nix's own defaults, needed to make this
+work:
+
+- `withUnityBuild = false` — Meson's unity-build feature (on by
+  default) merges many `.cc` files into one translation unit before
+  compiling, which coarsens ccache's per-file hit granularity to the
+  point of being nearly useless. NixOS/nix's own dev shell already
+  disables this for the same reason.
+- `withAWS = false` on `nix-store` — pulls in `aws-crt-cpp`, resolved
+  via CMake; CMake's own compiler-detection probes break under a
+  fully swapped `ccacheStdenv`. Not needed for this demo.
+
+And the same `-frandom-seed` fix as `hello-ccache`
+(`CCACHE_SLOPPINESS=random_seed`) — nixpkgs' cc-wrapper adds a fresh
+random seed flag to every compiler invocation, which would otherwise
+make every single compile a guaranteed cache miss.
+
 ## What's safe to cache
 
 Each package points a tool's own cache dir (or file) at the restored
