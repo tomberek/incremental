@@ -181,19 +181,22 @@ returns the same package restoring from that build instead — no
 {
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
   inputs.incremental.url = "github:tomberek/incremental";
-  outputs = { self, nixpkgs, incremental, ... }: {
-    packages.x86_64-linux.default = incremental.lib.mkIncrementalPackage {
-      name = "myapp";
-      system = "x86_64-linux";
-      cacheVars = [ "GOCACHE" ];
-      phase = "postConfigure";
-      drv = nixpkgs.legacyPackages.x86_64-linux.buildGoModule {
-        pname = "myapp";
-        src = ./.;
-        vendorHash = "...";
+  outputs = { self, nixpkgs, incremental, ... }:
+    let pkgs = nixpkgs.legacyPackages.x86_64-linux;
+    in {
+      packages.x86_64-linux.default = incremental.lib.mkIncrementalPackage {
+        name = "myapp";
+        system = "x86_64-linux";
+        inherit pkgs; # supplies nuke-refs
+        cacheVars = [ "GOCACHE" ];
+        phase = "postConfigure";
+        drv = pkgs.buildGoModule {
+          pname = "myapp";
+          src = ./.;
+          vendorHash = "...";
+        };
       };
     };
-  };
 }
 ```
 

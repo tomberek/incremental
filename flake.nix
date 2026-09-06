@@ -70,6 +70,7 @@
           cacheVars,
           drv,
           phase,
+          pkgs, # nuke-refs comes from here — see nukeScript below
           cache ? inputs.cache,
           nuke ? true,
           keepIncremental ? !(cache ? packages),
@@ -83,6 +84,10 @@
           {
             outputs = (old.outputs or [ "out" ]) ++ inc.outputs;
             ${phase} = (old.${phase} or "") + inc.restore;
+            # nuke-refs isn't on stdenv's PATH by default — added here so
+            # callers can't forget it and hit "command not found" the one
+            # time `nuke` actually fires (e.g. once keepIncremental flips).
+            nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ lib.optional nuke pkgs.nukeReferences;
             # Lets a third party restore from a build of theirs without touching
             # their own flake inputs: `pkg.withCache "git+file://...?rev=<sha>"`.
             # Needs a rev-pinned ref — builtins.getFlake requires locked input
@@ -101,6 +106,7 @@
                     cacheVars
                     drv
                     phase
+                    pkgs
                     nuke
                     extraPostInstall
                     ;
@@ -124,13 +130,14 @@
           name,
           system,
           drv,
+          pkgs,
           cache ? inputs.cache,
           cacheVars ? [ ],
           nuke ? cacheVars == [ ],
           extraPostInstall ? (_: ""),
         }:
         mkIncrementalPackage {
-          inherit name system cache cacheVars nuke extraPostInstall;
+          inherit name system cache cacheVars nuke extraPostInstall pkgs;
           keepIncremental = true; # --cache-file needs a real declared output
           phase = "postPatch";
           drv = drv.overrideAttrs (old: {
@@ -216,6 +223,7 @@
             system
             drv
             phase
+            pkgs
             cache
             nuke
             keepIncremental
@@ -410,7 +418,7 @@
                 in
                 (mkIncrementalAutotoolsPackage {
                   name = "hello-ccache";
-                  inherit system cache;
+                  inherit system cache pkgs;
                   cacheVars = [ "CCACHE_DIR" ];
                   drv = pkgs.hello.override { stdenv = pkgs.ccacheStdenv; };
                   extraPostInstall = _isCached: env.report;
@@ -428,14 +436,13 @@
 
           golang = mkIncrementalPackage {
             name = "golang";
-            inherit system;
+            inherit system pkgs;
             cacheVars = [ "GOCACHE" ];
             phase = "postConfigure";
             drv = pkgs.buildGoModule {
               name = "golang";
               src = pkgs.lib.cleanSource ./golang;
               vendorHash = "sha256-5xR9WCkpPpY9D0LR2mcdoOX34RqVpxJjgRwc4GEkGiE=";
-              nativeBuildInputs = [ pkgs.nukeReferences ];
             };
           };
 
@@ -467,7 +474,7 @@
 
           zig = mkIncrementalPackage {
             name = "zig";
-            inherit system;
+            inherit system pkgs;
             cacheVars = [
               "ZIG_LOCAL_CACHE_DIR"
               "ZIG_GLOBAL_CACHE_DIR"
@@ -476,10 +483,7 @@
             drv = pkgs.stdenvNoCC.mkDerivation {
               name = "zig";
               src = pkgs.lib.cleanSource ./zig;
-              nativeBuildInputs = [
-                pkgs.zig.hook
-                pkgs.nukeReferences
-              ];
+              nativeBuildInputs = [ pkgs.zig.hook ];
             };
           };
 
