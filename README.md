@@ -221,6 +221,27 @@ nix build --expr \
    in pkg.withCache "<cache-flake-ref>"'
 ```
 
+## Checks
+
+`nix flake check` builds two self-tests that catch regressions in the
+caching mechanism itself, not in any particular package:
+
+- `c-self-test` builds `c` cold, then calls its own `withCache` against
+  that same build and asserts the ccache hit rate stays near 100% —
+  this is what caught a real bug where an outer `overrideAttrs` layer
+  (ccache's env setup) wasn't carried into the inherited `withCache`,
+  silently dropping the hit rate to 0%.
+- `nuke-refs-self-test` does the same restore cycle for a minimal
+  package whose build always references `pkgs.hello` and sets
+  `disallowedReferences = [ pkgs.hello ]` — this is what caught a real
+  bug where `nuke-refs` was skipped whenever restoring from a real
+  cache, letting a fresh reference leak into the persisted output.
+
+Both synthesize a `cache` attrset directly from the cold build's own
+`.incremental` output (`withCache` accepts either a rev-pinned flake
+ref or an already-fetched flake), so the check needs no git/network
+access and stays hermetic under the build sandbox.
+
 ## Chained rebuilds don't produce their own `incremental` output
 
 A plain build always produces an `incremental` output — what a later

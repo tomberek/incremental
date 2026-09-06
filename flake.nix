@@ -91,14 +91,16 @@
             # Lets a third party restore from a build of theirs without touching
             # their own flake inputs: `pkg.withCache "git+file://...?rev=<sha>"`.
             # Needs a rev-pinned ref — builtins.getFlake requires locked input
-            # under pure eval, same as any flake input resolution.
+            # under pure eval, same as any flake input resolution. Also
+            # accepts an already-fetched flake (an attrset) directly, e.g.
+            # from `checks` (see below), where there's no ref to fetch.
             #
             # keepIncremental is carried over explicitly (not re-defaulted) —
             # it must stay fixed regardless of which cache is passed in, same
             # reason `outputs` must stay structurally constant (see above).
             passthru = (old.passthru or { }) // {
               withCache =
-                cacheFlakeRef:
+                cacheFlake:
                 mkIncrementalPackage {
                   inherit
                     name
@@ -111,7 +113,7 @@
                     extraPostInstall
                     ;
                   keepIncremental = inc.keepIncremental;
-                  cache = builtins.getFlake cacheFlakeRef;
+                  cache = if builtins.isString cacheFlake then builtins.getFlake cacheFlake else cacheFlake;
                 };
             };
           }
@@ -168,6 +170,7 @@
             pct=0
             if [ "$total" -gt 0 ]; then pct=$((hits * 100 / total)); fi
             echo "ccache[${pname}]: $hits/$total hits ($pct%)"
+            echo "$pct" > "${dir}/ccache-hit-pct" # read by `checks` — see below
             if [ "$misses" -gt 0 ] && [ -d "${debugDir}" ]; then
               echo "ccache[${pname}]: miss reasons (top):"
               find "${debugDir}" -name '*.ccache-log' -exec grep -m1 "Result:" {} + 2>/dev/null \
@@ -240,7 +243,7 @@
             # would silently drop CCACHE_SLOPPINESS/debug-logging/report.
             passthru = old.passthru // {
               withCache =
-                cacheFlakeRef:
+                cacheFlake:
                 mkIncrementalCcachePackage {
                   inherit
                     name
@@ -251,7 +254,7 @@
                     nuke
                     ;
                   keepIncremental = inc.keepIncremental;
-                  cache = builtins.getFlake cacheFlakeRef;
+                  cache = if builtins.isString cacheFlake then builtins.getFlake cacheFlake else cacheFlake;
                 };
             };
           });
@@ -428,7 +431,9 @@
                     # Overrides the inherited passthru.withCache from
                     # mkIncrementalPackage, which would skip env.setup above.
                     passthru = old.passthru // {
-                      withCache = cacheFlakeRef: mkHelloCcache (builtins.getFlake cacheFlakeRef);
+                      withCache =
+                        cacheFlake:
+                        mkHelloCcache (if builtins.isString cacheFlake then builtins.getFlake cacheFlake else cacheFlake);
                     };
                   });
             in
@@ -495,6 +500,66 @@
         // lib.genAttrs nixComponentNames (
           target: (mkIncrementalNixComponents { inherit system target; }).${target}
         )
+      ) inputs.nixpkgs.legacyPackages;
+      # Self-tests: build a package cold, then call its own withCache
+      # against that same cold build (synthesized as a `cache` attrset —
+      # no git/flake fetch needed) and check the result. A regression here
+      # previously slipped through as a real bug twice — nuke-refs
+      # silently skipped whenever restoring from a real cache (caught by
+      # nuke-refs-self-test, a minimal package whose build always writes
+      # a fresh store-path reference into its cache dir, so a skipped
+      # nuke leaks that reference into $incremental and Nix's own
+      # reference scanner rejects the output), and ccache's env vars
+      # dropped by an outer overrideAttrs layer that withCache's default
+      # implementation doesn't see (caught by c-self-test's hit-rate
+      # assertion, which would silently read ~0% instead of ~100%).
+      checks = builtins.mapAttrs (
+        system: pkgs:
+        let
+          coldC = inputs.self.packages.${system}.c;
+          coldNukeTest = mkIncrementalPackage {
+            name = "nuke-refs-self-test";
+            inherit system pkgs;
+            cacheVars = [ "REF_CACHE_DIR" ];
+            phase = "postPatch";
+            # References pkgs.hello on every build, cold or warm — a real
+            # store path a leftover restore script can't produce by luck.
+            # disallowedReferences makes Nix actually reject a leak instead
+            # of silently succeeding, matching what buildGoModule's own
+            # toolchain reference check does in practice (see README).
+            drv = pkgs.stdenvNoCC.mkDerivation {
+              name = "nuke-refs-self-test";
+              src = ./.;
+              dontUnpack = true;
+              disallowedReferences = [ pkgs.hello ];
+              installPhase = ''
+                runHook preInstall
+                mkdir -p $out "$REF_CACHE_DIR/objects"
+                echo "${pkgs.hello}" > "$REF_CACHE_DIR/objects/ref-$RANDOM"
+                runHook postInstall
+              '';
+            };
+          };
+        in
+        {
+          c-self-test =
+            (coldC.withCache { packages.${system}.c.incremental = coldC.incremental; }).overrideAttrs
+              (old: {
+                postInstall =
+                  old.postInstall
+                  + ''
+                    pct=$(cat $incremental/ccache-hit-pct)
+                    echo "self-test[c]: $pct% ccache hits restoring an unchanged build"
+                    if [ "$pct" -lt 90 ]; then
+                      echo "self-test[c]: FAILED — expected near-total hits" >&2
+                      exit 1
+                    fi
+                  '';
+              });
+          nuke-refs-self-test = coldNukeTest.withCache {
+            packages.${system}."nuke-refs-self-test".incremental = coldNukeTest.incremental;
+          };
+        }
       ) inputs.nixpkgs.legacyPackages;
     };
 }
