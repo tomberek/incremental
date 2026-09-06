@@ -9,51 +9,56 @@
     let
       lib = inputs.nixpkgs.lib;
 
-      # Restores the `incremental` output of a previous build (from
-      # the `cache` flake input, usually overridden to an earlier
-      # checkout) and points cacheVars at it. On a fresh cache,
-      # nuke-refs it so store paths don't leak into the cache blob.
+      # Restores a previous build's `incremental` output (from `cache`,
+      # normally overridden to an earlier checkout) and exports cacheVars
+      # pointing at it.
       #
-      # By default, once we're already restoring from an injected
-      # `cache` override, this build does NOT also produce its own
-      # persisted "incremental" output — it uses a throwaway scratch
-      # dir instead, still readable/writable for this build, just
-      # discarded afterward. Otherwise every hop in a chain of
-      # `--override-input cache ...` rebuilds would leave behind its
-      # own redundant multi-hundred-MB cache blob, almost never read
-      # again. Pass `keepIncremental = true` to opt back into
-      # producing a real output (e.g. to keep chaining further).
+      # `outputs` always includes "incremental", even when the cache dir
+      # lives elsewhere (see keepIncremental) — a varying outputs list
+      # changes the derivation hash, which changes every -I/-isystem flag
+      # a dependent embeds it in, breaking their caching too.
+      #
+      # keepIncremental defaults off once already restoring from `cache`,
+      # to avoid leaving a redundant cache blob on top of the one just
+      # read. Pass `keepIncremental = true` to keep producing a real one.
       mkIncremental =
         {
-          name, # key into inputs.cache.packages.${system}
+          name, # key into cache.packages.${system}
           system,
           cacheVars, # env vars to point at the restored cache dir
-          nuke ? true,
+          nuke ? true, # nuke-refs a fresh (uncached) dir
           keepIncremental ? !(inputs.cache ? packages),
         }:
         let
           prevIncremental = inputs.cache.packages.${system}.${name}.incremental or "empty";
           isCached = inputs.cache ? packages;
           dir = if keepIncremental then "$incremental" else "$NIX_BUILD_TOP/incremental-scratch";
+          debugDir = "$incremental/debug-logs"; # per-file hit/miss logs, always kept
         in
         {
-          inherit isCached keepIncremental dir;
-          outputs = lib.optional keepIncremental "incremental";
+          inherit
+            isCached
+            keepIncremental
+            dir
+            debugDir
+            ;
+          outputs = [ "incremental" ];
           restore =
-            ''
+            lib.optionalString (!keepIncremental) "mkdir -p $incremental\n"
+            + ''
               mkdir -p empty
               cp -r ${prevIncremental} ${dir}
               chmod -R +w ${dir}
+              mkdir -p ${debugDir}
             ''
             + lib.concatMapStrings (v: "export ${v}=${dir}\n") cacheVars;
           nukeScript = if keepIncremental && nuke && !isCached then "nuke-refs ${dir}/*/*\n" else "";
         };
 
-      # Wraps a plain derivation with mkIncremental's outputs/restore/
-      # nuke wiring. `phase` picks which builder phase to splice the
-      # restore script into (postPatch, postConfigure, preConfigure).
-      # `extraPostInstall` can see isCached for things like ccache's
-      # --show-stats vs --zero-stats.
+      # `phase` is whichever hook runs before the tool reads its cache
+      # dir. Required, not defaulted: buildGoModule's own configurePhase
+      # sets $GOCACHE and only then runs postConfigure, so golang needs
+      # that specific hook.
       mkIncrementalPackage =
         {
           name,
@@ -79,19 +84,11 @@
           }
         );
 
-      # mkIncrementalPackage plus autoconf's --cache-file, so
-      # AC_CHECK_*/AC_TRY_* results survive rebuilds. Deliberately
-      # doesn't touch config.status/Makefile/config.h — those bake
-      # $out into text and (for gettext-style builds) into the
-      # compiled binary, so they're not safe to restore across a
-      # source-only patch. See README's "What's safe to cache".
-      #
-      # Always keeps the "incremental" output (keepIncremental = true,
-      # unconditionally) — `--cache-file` below is wired via
-      # `builtins.placeholder "incremental"`, a Nix-level
-      # substitution that only resolves for a real, declared output;
-      # unlike the plain env-var caches (ccache/Go/Zig), this
-      # mechanism has no scratch-dir fallback to opt out into.
+      # Adds autoconf's --cache-file so AC_CHECK_*/AC_TRY_* results
+      # survive rebuilds. Never touches config.status/Makefile/config.h —
+      # those bake $out into text (and sometimes into the compiled
+      # binary), so they're not safe to restore across a source patch.
+      # See README, "What's safe to cache".
       mkIncrementalAutotoolsPackage =
         {
           name,
@@ -103,7 +100,7 @@
         }:
         mkIncrementalPackage {
           inherit name system cacheVars nuke extraPostInstall;
-          keepIncremental = true;
+          keepIncremental = true; # --cache-file needs a real declared output
           phase = "postPatch";
           drv = drv.overrideAttrs (old: {
             configureFlags = (old.configureFlags or [ ]) ++ [
@@ -112,38 +109,114 @@
           });
         };
 
-      # NixOS/nix's flake splits the `nix` package into ~14 Meson/
-      # Ninja component derivations (nix-util, nix-store, nix-expr,
-      # ...) built via a shared scope (`nix.lib.makeComponents`) that
-      # exposes `overrideAllMesonComponents`: an overlay-shaped
-      # function applied to every component, transitively — building
-      # nix-cli also applies it to nix-store/nix-util/etc. underneath.
-      # That's the seam mkIncremental needs: one ccacheStdenv + one
-      # restore script, applied once, reaching every component.
+      # Shared ccache env/report shell.
+      ccacheEnv =
+        { pkgs, pname, dir, debugDir }:
+        {
+          setup = ''
+            export CCACHE_SLOPPINESS=random_seed,include_file_mtime,include_file_ctime
+            export CCACHE_COMPRESS=1
+            export CCACHE_UMASK=007
+            export CCACHE_NOINODECACHE=1
+            export CCACHE_DEBUG=1
+            export CCACHE_DEBUGDIR="${debugDir}"
+            ${pkgs.ccache}/bin/ccache --dir "${dir}" --zero-stats > /dev/null
+          '';
+          report = ''
+            ${pkgs.ccache}/bin/ccache --dir "${dir}" --show-stats
+            hits=$(${pkgs.ccache}/bin/ccache --dir "${dir}" --print-stats | awk '$1=="direct_cache_hit"||$1=="preprocessed_cache_hit"{s+=$2}END{print s+0}')
+            misses=$(${pkgs.ccache}/bin/ccache --dir "${dir}" --print-stats | awk '$1=="cache_miss"{print $2+0}')
+            total=$((hits + misses))
+            pct=0
+            if [ "$total" -gt 0 ]; then pct=$((hits * 100 / total)); fi
+            echo "ccache[${pname}]: $hits/$total hits ($pct%)"
+            if [ "$misses" -gt 0 ] && [ -d "${debugDir}" ]; then
+              echo "ccache[${pname}]: miss reasons (top):"
+              find "${debugDir}" -name '*.ccache-log' -exec grep -m1 "Result:" {} + 2>/dev/null \
+                | sed -E 's/^.*Result: //' | sort | uniq -c | sort -rn | head -5 \
+                | sed "s/^/ccache[${pname}]:   /" || true
+            fi
+          '';
+        };
+
+      # Add ccache caching to a package: mkIncrementalCcachePackage
+      # { name, system, pkgs, drv, phase }. `drv` must already be built
+      # with ccacheStdenv (a plain stdenv.mkDerivation has no .override
+      # for swapping it in after the fact); the assert below catches a
+      # missing ccacheStdenv at eval time instead of a sandbox
+      # "Permission denied" during the build.
       #
-      # Ninja (like make) is purely mtime-based with no content-hash
-      # fallback, so restoring its own build-directory state hits the
-      # same silent-stale-object problem ruled out for autoconf/make
-      # (see README). ccache is the safe layer here, same as
-      # hello-ccache — its correctness relies on hashing preprocessed
-      # source + flags, not mtimes.
+      # `phase`: same rule as mkIncrementalPackage — use postPatch if the
+      # package skips configurePhase (dontConfigure or similar).
+      mkIncrementalCcachePackage =
+        {
+          name,
+          system,
+          pkgs,
+          drv,
+          phase,
+          nuke ? false, # ccache manages its own dir
+          keepIncremental ? !(inputs.cache ? packages),
+        }:
+        assert lib.assertMsg (drv.stdenv.cc.pname or "" == "ccache-links-wrapper")
+          "mkIncrementalCcachePackage: `drv` (${name}) wasn't built with pkgs.ccacheStdenv.";
+        let
+          inc = mkIncremental {
+            inherit
+              name
+              system
+              nuke
+              keepIncremental
+              ;
+            cacheVars = [ "CCACHE_DIR" ];
+          };
+          env = ccacheEnv {
+            inherit pkgs;
+            pname = name;
+            dir = inc.dir;
+            debugDir = inc.debugDir;
+          };
+        in
+        (mkIncrementalPackage {
+          inherit
+            name
+            system
+            drv
+            phase
+            nuke
+            keepIncremental
+            ;
+          cacheVars = [ "CCACHE_DIR" ];
+          extraPostInstall = _isCached: env.report;
+        }).overrideAttrs
+          (old: {
+            # env.setup needs CCACHE_DIR live, which inc.restore just set
+            # in ${phase} — so it has to run after, in one more layer.
+            ${phase} = old.${phase} + env.setup;
+          });
+
+      # NixOS/nix's flake splits `nix` into ~14 Meson/Ninja component
+      # derivations (nix-util, nix-store, nix-expr, ...) sharing a scope
+      # with overrideAllMesonComponents: an overlay applied to every
+      # component, so building nix-cli applies it underneath too.
       #
-      # `withUnityBuild` (on by default) merges many .cc files into
-      # one translation unit per Meson's unity-build feature, which
-      # coarsens ccache's per-file hit granularity; nix's own dev
-      # shell already disables it for the same reason.
+      # withUnityBuild = false: unity builds merge many .cc files into
+      # one translation unit, wrecking ccache's per-file hit rate.
+      # withAWS = false on nix-store: aws-crt-cpp resolves via CMake,
+      # whose compiler-detection breaks under a swapped ccacheStdenv.
       #
-      # `withAWS` on nix-store (on by default when aws-c-common is
-      # available) pulls in aws-crt-cpp, resolved via CMake — under a
-      # fully-swapped ccacheStdenv, CMake's own compiler-detection
-      # probes for it fail. Not something this demo needs; disabled
-      # here rather than chasing ccache+CMake compatibility.
-      #
-      # Uses NixOS/nix's own pinned nixpkgs (`inputs.nix.inputs.nixpkgs`),
-      # not this flake's — the component `meson.build`s require a
-      # newer Meson than this repo's nixpkgs pin ships.
+      # Only `target` gets a cache-varying restore script; every
+      # dependency gets a fixed one. `cache` is a nested evaluation of
+      # this same flake with its own `cache` input — if a shared
+      # dependency's script varied with caching state, it would build a
+      # different derivation (different `dev` output path) inside
+      # `cache`'s tree vs. the target's tree, and dependents embed that
+      # path in every -I/-isystem flag, turning every file into a miss
+      # regardless of actual source changes. Tradeoff: only the
+      # component you're building gets cross-build ccache hits; its
+      # dependencies fall back to plain store substitution.
       mkIncrementalNixComponents =
-        { system }:
+        { system, target }:
         let
           pkgs = inputs.nix.inputs.nixpkgs.legacyPackages.${system};
           scope = (inputs.nix.lib.makeComponents {
@@ -154,51 +227,53 @@
               withUnityBuild = false;
               nix-store = prevScope.nix-store.override { withAWS = false; };
             });
+
+          # random_seed: stdenv's cc-wrapper adds a fresh -frandom-seed
+          # every invocation, a guaranteed miss otherwise.
+          # include_file_mtime/ctime: every dependency header is
+          # materialized fresh each build, which ccache's own "recently
+          # modified" safety check would otherwise reject.
+          ccacheTuning = ''
+            export CCACHE_SLOPPINESS=random_seed,include_file_mtime,include_file_ctime
+            export CCACHE_COMPRESS=1
+            export CCACHE_UMASK=007
+          '';
         in
         scope.overrideAllMesonComponents (
           finalAttrs: prevAttrs:
-          let
-            inc = mkIncremental {
-              name = prevAttrs.pname;
-              inherit system;
-              cacheVars = [ "CCACHE_DIR" ];
-              nuke = false; # ccache manages its own dir; nothing to scrub
-            };
-          in
-          {
-            outputs = (prevAttrs.outputs or [ "out" ]) ++ inc.outputs;
-            # preConfigure, not postConfigure: Meson resolves
-            # CMake-based deps (e.g. nix-expr's toml11) during
-            # configurePhase itself, and needs CCACHE_DIR set before
-            # that starts or CMake's compiler-detection silently
-            # fails against the unwritable default ccache dir.
-            #
-            # CCACHE_SLOPPINESS=random_seed: stdenv's cc-wrapper adds
-            # a fresh -frandom-seed=<random> to every invocation (for
-            # reproducibility unrelated to ccache); without this,
-            # every single compile is a guaranteed cache miss no
-            # matter what — same fix hello-ccache already applies.
-            preConfigure =
-              (prevAttrs.preConfigure or "")
-              + inc.restore
-              + ''
-                export CCACHE_SLOPPINESS=random_seed
-                export CCACHE_COMPRESS=1
-                export CCACHE_UMASK=007
-                ${pkgs.ccache}/bin/ccache --dir "$CCACHE_DIR" --zero-stats > /dev/null
-              '';
-            postInstall =
-              (prevAttrs.postInstall or "")
-              + ''
-                ${pkgs.ccache}/bin/ccache --dir "$CCACHE_DIR" --show-stats
-                hits=$(${pkgs.ccache}/bin/ccache --dir "$CCACHE_DIR" --print-stats | awk '$1=="direct_cache_hit"||$1=="preprocessed_cache_hit"{s+=$2}END{print s+0}')
-                misses=$(${pkgs.ccache}/bin/ccache --dir "$CCACHE_DIR" --print-stats | awk '$1=="cache_miss"{print $2+0}')
-                total=$((hits + misses))
-                pct=0
-                if [ "$total" -gt 0 ]; then pct=$((hits * 100 / total)); fi
-                echo "ccache[${prevAttrs.pname}]: $hits/$total hits ($pct%)"
-              '';
-          }
+          if prevAttrs.pname == target then
+            let
+              inc = mkIncremental {
+                name = prevAttrs.pname;
+                inherit system;
+                cacheVars = [ "CCACHE_DIR" ];
+                nuke = false;
+                keepIncremental = true;
+              };
+              env = ccacheEnv {
+                inherit pkgs;
+                pname = prevAttrs.pname;
+                dir = inc.dir;
+                debugDir = inc.debugDir;
+              };
+            in
+            {
+              outputs = (prevAttrs.outputs or [ "out" ]) ++ inc.outputs;
+              # Meson resolves CMake deps (e.g. nix-expr's toml11) during
+              # configurePhase, so CCACHE_DIR must be live before that.
+              preConfigure = (prevAttrs.preConfigure or "") + inc.restore + env.setup;
+              postInstall = (prevAttrs.postInstall or "") + env.report;
+            }
+          else
+            {
+              preConfigure =
+                (prevAttrs.preConfigure or "")
+                + ''
+                  mkdir -p "$NIX_BUILD_TOP/ccache-scratch"
+                  export CCACHE_DIR="$NIX_BUILD_TOP/ccache-scratch"
+                ''
+                + ccacheTuning;
+            }
         );
     in
     {
@@ -212,43 +287,41 @@
       packages = builtins.mapAttrs (
         system: pkgs:
         let
-          nixComponents = mkIncrementalNixComponents { inherit system; };
+          nixComponentNames = [
+            "nix-util"
+            "nix-util-c"
+            "nix-store"
+            "nix-store-c"
+            "nix-fetchers"
+            "nix-fetchers-c"
+            "nix-expr"
+            "nix-expr-c"
+            "nix-flake"
+            "nix-flake-c"
+            "nix-main"
+            "nix-main-c"
+            "nix-cmd"
+          ];
         in
         {
           hello-ccache =
+            let
+              env = ccacheEnv {
+                inherit pkgs;
+                pname = "hello-ccache";
+                dir = "$incremental";
+                debugDir = "$incremental/debug-logs";
+              };
+            in
             (mkIncrementalAutotoolsPackage {
               name = "hello-ccache";
               inherit system;
               cacheVars = [ "CCACHE_DIR" ];
-              drv = (pkgs.hello.override { stdenv = pkgs.ccacheStdenv; }).overrideAttrs (old: {
-                postPatch = ''
-                  export CCACHE_COMPRESS=1
-                  export CCACHE_UMASK=007
-                  export CCACHE_SLOPPINESS="random_seed"
-                  export CCACHE_NOINODECACHE=1
-                '';
-              });
-              extraPostInstall =
-                _isCached:
-                ''
-                  ${pkgs.ccache}/bin/ccache --dir "$incremental" --show-stats
-                  hits=$(${pkgs.ccache}/bin/ccache --dir "$incremental" --print-stats | awk '$1=="direct_cache_hit"||$1=="preprocessed_cache_hit"{s+=$2}END{print s+0}')
-                  misses=$(${pkgs.ccache}/bin/ccache --dir "$incremental" --print-stats | awk '$1=="cache_miss"{print $2+0}')
-                  total=$((hits + misses))
-                  pct=0
-                  if [ "$total" -gt 0 ]; then pct=$((hits * 100 / total)); fi
-                  echo "ccache[hello-ccache]: $hits/$total hits ($pct%)"
-                '';
+              drv = pkgs.hello.override { stdenv = pkgs.ccacheStdenv; };
+              extraPostInstall = _isCached: env.report;
             }).overrideAttrs
               (old: {
-                # inc.restore (which sets CCACHE_DIR) is appended
-                # last inside mkIncrementalAutotoolsPackage's own
-                # postPatch, so zeroing has to happen in one more
-                # layer after it, to isolate this build's own hits
-                # from history recorded in the restored cache.
-                postPatch = old.postPatch + ''
-                  ${pkgs.ccache}/bin/ccache --dir "$incremental" --zero-stats > /dev/null
-                '';
+                postPatch = old.postPatch + env.setup;
               });
 
           golang = mkIncrementalPackage {
@@ -261,6 +334,32 @@
               src = pkgs.lib.cleanSource ./golang;
               vendorHash = "sha256-5xR9WCkpPpY9D0LR2mcdoOX34RqVpxJjgRwc4GEkGiE=";
               nativeBuildInputs = [ pkgs.nukeReferences ];
+            };
+          };
+
+          # Worked example for mkIncrementalCcachePackage: plain C, no build system.
+          c = mkIncrementalCcachePackage {
+            name = "c";
+            inherit system pkgs;
+            phase = "postPatch"; # dontConfigure skips configurePhase, so preConfigure would too
+            drv = pkgs.ccacheStdenv.mkDerivation {
+              name = "c";
+              src = pkgs.lib.cleanSource ./c;
+              dontConfigure = true;
+              buildPhase = ''
+                runHook preBuild
+                $CC -c a.c -o a.o
+                $CC -c b.c -o b.o
+                $CC -c main.c -o main.o
+                $CC a.o b.o main.o -o c
+                runHook postBuild
+              '';
+              installPhase = ''
+                runHook preInstall
+                mkdir -p $out/bin
+                cp c $out/bin/
+                runHook postInstall
+              '';
             };
           };
 
@@ -282,30 +381,14 @@
             };
           };
 
-          nix-incremental = nixComponents.nix-cli;
+          nix-incremental = (mkIncrementalNixComponents {
+            inherit system;
+            target = "nix-cli";
+          }).nix-cli;
         }
-        # Each component on nix-cli's dependency chain also needs its
-        # own top-level package attribute, named after its `pname` —
-        # mkIncrementalNixComponents looks up
-        # `inputs.cache.packages.${system}.${pname}.incremental` to
-        # restore that component's ccache dir, so the name has to
-        # resolve at the top level of *this* flake's own `packages`,
-        # the same way hello-ccache/golang/zig do.
-        // lib.genAttrs [
-          "nix-util"
-          "nix-util-c"
-          "nix-store"
-          "nix-store-c"
-          "nix-fetchers"
-          "nix-fetchers-c"
-          "nix-expr"
-          "nix-expr-c"
-          "nix-flake"
-          "nix-flake-c"
-          "nix-main"
-          "nix-main-c"
-          "nix-cmd"
-        ] (pname: nixComponents.${pname})
+        // lib.genAttrs nixComponentNames (
+          target: (mkIncrementalNixComponents { inherit system target; }).${target}
+        )
       ) inputs.nixpkgs.legacyPackages;
     };
 }
