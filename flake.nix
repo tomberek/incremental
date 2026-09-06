@@ -26,12 +26,13 @@
           name, # key into cache.packages.${system}
           system,
           cacheVars, # env vars to point at the restored cache dir
+          cache ? inputs.cache, # an already-fetched flake to restore from
           nuke ? true, # nuke-refs a fresh (uncached) dir
-          keepIncremental ? !(inputs.cache ? packages),
+          keepIncremental ? !(cache ? packages),
         }:
         let
-          prevIncremental = inputs.cache.packages.${system}.${name}.incremental or "empty";
-          isCached = inputs.cache ? packages;
+          prevIncremental = cache.packages.${system}.${name}.incremental or "empty";
+          isCached = cache ? packages;
           dir = if keepIncremental then "$incremental" else "$NIX_BUILD_TOP/incremental-scratch";
           debugDir = "$incremental/debug-logs"; # per-file hit/miss logs, always kept
         in
@@ -52,7 +53,10 @@
               mkdir -p ${debugDir}
             ''
             + lib.concatMapStrings (v: "export ${v}=${dir}\n") cacheVars;
-          nukeScript = if keepIncremental && nuke && !isCached then "nuke-refs ${dir}/*/*\n" else "";
+          # Runs even when restoring from a real cache: the build still
+          # writes new cache entries during this build on top of the
+          # restored ones, and those were never nuked.
+          nukeScript = if keepIncremental && nuke then "nuke-refs ${dir}/*/*\n" else "";
         };
 
       # `phase` is whichever hook runs before the tool reads its cache
@@ -66,18 +70,44 @@
           cacheVars,
           drv,
           phase,
+          cache ? inputs.cache,
           nuke ? true,
-          keepIncremental ? !(inputs.cache ? packages),
+          keepIncremental ? !(cache ? packages),
           extraPostInstall ? (_: ""),
         }:
         let
-          inc = mkIncremental { inherit name system cacheVars nuke keepIncremental; };
+          inc = mkIncremental { inherit name system cacheVars cache nuke keepIncremental; };
         in
         drv.overrideAttrs (
           old:
           {
             outputs = (old.outputs or [ "out" ]) ++ inc.outputs;
             ${phase} = (old.${phase} or "") + inc.restore;
+            # Lets a third party restore from a build of theirs without touching
+            # their own flake inputs: `pkg.withCache "git+file://...?rev=<sha>"`.
+            # Needs a rev-pinned ref — builtins.getFlake requires locked input
+            # under pure eval, same as any flake input resolution.
+            #
+            # keepIncremental is carried over explicitly (not re-defaulted) —
+            # it must stay fixed regardless of which cache is passed in, same
+            # reason `outputs` must stay structurally constant (see above).
+            passthru = (old.passthru or { }) // {
+              withCache =
+                cacheFlakeRef:
+                mkIncrementalPackage {
+                  inherit
+                    name
+                    system
+                    cacheVars
+                    drv
+                    phase
+                    nuke
+                    extraPostInstall
+                    ;
+                  keepIncremental = inc.keepIncremental;
+                  cache = builtins.getFlake cacheFlakeRef;
+                };
+            };
           }
           // lib.optionalAttrs (nuke || (extraPostInstall inc.isCached) != "") {
             postInstall = (old.postInstall or "") + inc.nukeScript + extraPostInstall inc.isCached;
@@ -94,12 +124,13 @@
           name,
           system,
           drv,
+          cache ? inputs.cache,
           cacheVars ? [ ],
           nuke ? cacheVars == [ ],
           extraPostInstall ? (_: ""),
         }:
         mkIncrementalPackage {
-          inherit name system cacheVars nuke extraPostInstall;
+          inherit name system cache cacheVars nuke extraPostInstall;
           keepIncremental = true; # --cache-file needs a real declared output
           phase = "postPatch";
           drv = drv.overrideAttrs (old: {
@@ -155,8 +186,9 @@
           pkgs,
           drv,
           phase,
+          cache ? inputs.cache,
           nuke ? false, # ccache manages its own dir
-          keepIncremental ? !(inputs.cache ? packages),
+          keepIncremental ? !(cache ? packages),
         }:
         assert lib.assertMsg (drv.stdenv.cc.pname or "" == "ccache-links-wrapper")
           "mkIncrementalCcachePackage: `drv` (${name}) wasn't built with pkgs.ccacheStdenv.";
@@ -165,6 +197,7 @@
             inherit
               name
               system
+              cache
               nuke
               keepIncremental
               ;
@@ -183,6 +216,7 @@
             system
             drv
             phase
+            cache
             nuke
             keepIncremental
             ;
@@ -193,6 +227,25 @@
             # env.setup needs CCACHE_DIR live, which inc.restore just set
             # in ${phase} — so it has to run after, in one more layer.
             ${phase} = old.${phase} + env.setup;
+            # Overrides the inherited passthru.withCache from
+            # mkIncrementalPackage — that one skips env.setup, which
+            # would silently drop CCACHE_SLOPPINESS/debug-logging/report.
+            passthru = old.passthru // {
+              withCache =
+                cacheFlakeRef:
+                mkIncrementalCcachePackage {
+                  inherit
+                    name
+                    system
+                    pkgs
+                    drv
+                    phase
+                    nuke
+                    ;
+                  keepIncremental = inc.keepIncremental;
+                  cache = builtins.getFlake cacheFlakeRef;
+                };
+            };
           });
 
       # NixOS/nix's flake splits `nix` into ~14 Meson/Ninja component
@@ -277,11 +330,50 @@
         );
     in
     {
+      lib = {
+        inherit
+          mkIncremental
+          mkIncrementalPackage
+          mkIncrementalAutotoolsPackage
+          ccacheEnv
+          mkIncrementalCcachePackage
+          mkIncrementalNixComponents
+          ;
+      };
       formatter = builtins.mapAttrs (system: pkgs: pkgs.nixfmt-tree) inputs.nixpkgs.legacyPackages;
       devShells = builtins.mapAttrs (system: pkgs: rec {
         default = pkgs.mkShell {
           name = "dev-shell";
           inputsFrom = builtins.attrValues inputs.self.packages.${system};
+        };
+      }) inputs.nixpkgs.legacyPackages;
+      # Wraps `nix build --expr '(builtins.getFlake ...).<attrpath>.withCache "<cacheRef>"'`
+      # so a third party can restore from a prior build without --impure or
+      # editing their own flake.nix — `withCache` needs a rev-pinned ref, so
+      # this stays pure eval.
+      apps = builtins.mapAttrs (system: pkgs: {
+        with-cache = {
+          type = "app";
+          program = "${pkgs.writeShellScript "with-cache" ''
+            set -euo pipefail
+            if [ "$#" -lt 2 ]; then
+              echo "usage: with-cache <flake-ref>#<attrpath> <cache-flake-ref> [nix build args...]" >&2
+              exit 1
+            fi
+            target="$1"; cacheRef="$2"; shift 2
+            flakeRef="''${target%%#*}"
+            attrPathStr="''${target#*#}"
+            if [ "$flakeRef" = "$target" ]; then
+              echo "error: target must be <flake-ref>#<attrpath>" >&2
+              exit 1
+            fi
+            IFS='.' read -r -a parts <<< "$attrPathStr"
+            nixList="["
+            for p in "''${parts[@]}"; do nixList+=" \"$p\""; done
+            nixList+=" ]"
+            expr="let pkg = builtins.foldl' (acc: a: acc.\''${a}) (builtins.getFlake \"$flakeRef\") $nixList; in pkg.withCache \"$cacheRef\""
+            exec ${pkgs.nix}/bin/nix build --expr "$expr" "$@"
+          ''}";
         };
       }) inputs.nixpkgs.legacyPackages;
       packages = builtins.mapAttrs (
@@ -306,23 +398,33 @@
         {
           hello-ccache =
             let
-              env = ccacheEnv {
-                inherit pkgs;
-                pname = "hello-ccache";
-                dir = "$incremental";
-                debugDir = "$incremental/debug-logs";
-              };
+              mkHelloCcache =
+                cache:
+                let
+                  env = ccacheEnv {
+                    inherit pkgs;
+                    pname = "hello-ccache";
+                    dir = "$incremental";
+                    debugDir = "$incremental/debug-logs";
+                  };
+                in
+                (mkIncrementalAutotoolsPackage {
+                  name = "hello-ccache";
+                  inherit system cache;
+                  cacheVars = [ "CCACHE_DIR" ];
+                  drv = pkgs.hello.override { stdenv = pkgs.ccacheStdenv; };
+                  extraPostInstall = _isCached: env.report;
+                }).overrideAttrs
+                  (old: {
+                    postPatch = old.postPatch + env.setup;
+                    # Overrides the inherited passthru.withCache from
+                    # mkIncrementalPackage, which would skip env.setup above.
+                    passthru = old.passthru // {
+                      withCache = cacheFlakeRef: mkHelloCcache (builtins.getFlake cacheFlakeRef);
+                    };
+                  });
             in
-            (mkIncrementalAutotoolsPackage {
-              name = "hello-ccache";
-              inherit system;
-              cacheVars = [ "CCACHE_DIR" ];
-              drv = pkgs.hello.override { stdenv = pkgs.ccacheStdenv; };
-              extraPostInstall = _isCached: env.report;
-            }).overrideAttrs
-              (old: {
-                postPatch = old.postPatch + env.setup;
-              });
+            mkHelloCcache inputs.cache;
 
           golang = mkIncrementalPackage {
             name = "golang";

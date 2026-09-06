@@ -165,6 +165,59 @@ strings, e.g. gnulib's `git-version-gen`).
 For compile-level caching beyond `config.cache`, use `ccacheStdenv`
 rather than trying to skip `./configure`.
 
+## Using this as a library from another flake
+
+`inputs.cache`/`--override-input` requires the flake being built to declare
+`cache` as an input — fine for packages that live in this repo, but it means
+a third party has to edit their own `flake.nix` to opt in.
+
+Every `mkIncrementalPackage`-based derivation also carries
+`passthru.withCache`, a plain function that takes a rev-pinned flake ref and
+returns the same package restoring from that build instead — no
+`--override-input`, no changes to the caller's `flake.nix`:
+
+```nix
+# their flake.nix — no inputs.cache, no other changes needed
+{
+  inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+  inputs.incremental.url = "github:tomberek/incremental";
+  outputs = { self, nixpkgs, incremental, ... }: {
+    packages.x86_64-linux.default = incremental.lib.mkIncrementalPackage {
+      name = "myapp";
+      system = "x86_64-linux";
+      cacheVars = [ "GOCACHE" ];
+      phase = "postConfigure";
+      drv = nixpkgs.legacyPackages.x86_64-linux.buildGoModule {
+        pname = "myapp";
+        src = ./.;
+        vendorHash = "...";
+      };
+    };
+  };
+}
+```
+
+```
+$ nix build .#default   # also produces .#default.incremental
+echo "// x" >> main.go
+$ nix run github:tomberek/incremental#with-cache -- \
+    "git+file://$PWD?rev=HEAD#packages.x86_64-linux.default" \
+    "git+file://$PWD?rev=<pre-edit-commit>"
+```
+
+`withCache` requires a rev-pinned ref (`?rev=<sha>`, not `?ref=HEAD` or a
+branch name) — `builtins.getFlake` only resolves locked refs under pure
+eval, so this needs no `--impure`.
+
+The `with-cache` app is just this, spelled without `--impure --expr`:
+
+```
+nix build --expr \
+  'let pkg = builtins.foldl'"'"' (acc: a: acc.${a})
+       (builtins.getFlake "<flake-ref>") ["packages" "x86_64-linux" "default"];
+   in pkg.withCache "<cache-flake-ref>"'
+```
+
 ## Chained rebuilds don't produce their own `incremental` output
 
 A plain build always produces an `incremental` output — what a later
