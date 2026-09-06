@@ -13,28 +13,40 @@
       # the `cache` flake input, usually overridden to an earlier
       # checkout) and points cacheVars at it. On a fresh cache,
       # nuke-refs it so store paths don't leak into the cache blob.
+      #
+      # By default, once we're already restoring from an injected
+      # `cache` override, this build does NOT also produce its own
+      # persisted "incremental" output — it uses a throwaway scratch
+      # dir instead, still readable/writable for this build, just
+      # discarded afterward. Otherwise every hop in a chain of
+      # `--override-input cache ...` rebuilds would leave behind its
+      # own redundant multi-hundred-MB cache blob, almost never read
+      # again. Pass `keepIncremental = true` to opt back into
+      # producing a real output (e.g. to keep chaining further).
       mkIncremental =
         {
           name, # key into inputs.cache.packages.${system}
           system,
-          cacheVars, # env vars to point at the restored $incremental
+          cacheVars, # env vars to point at the restored cache dir
           nuke ? true,
+          keepIncremental ? !(inputs.cache ? packages),
         }:
         let
           prevIncremental = inputs.cache.packages.${system}.${name}.incremental or "empty";
           isCached = inputs.cache ? packages;
+          dir = if keepIncremental then "$incremental" else "$NIX_BUILD_TOP/incremental-scratch";
         in
         {
-          inherit isCached;
-          outputs = [ "incremental" ];
+          inherit isCached keepIncremental dir;
+          outputs = lib.optional keepIncremental "incremental";
           restore =
             ''
               mkdir -p empty
-              cp -r ${prevIncremental} $incremental
-              chmod -R +w $incremental
+              cp -r ${prevIncremental} ${dir}
+              chmod -R +w ${dir}
             ''
-            + lib.concatMapStrings (v: "export ${v}=$incremental\n") cacheVars;
-          nukeScript = if nuke && !isCached then "nuke-refs $incremental/*/*\n" else "";
+            + lib.concatMapStrings (v: "export ${v}=${dir}\n") cacheVars;
+          nukeScript = if keepIncremental && nuke && !isCached then "nuke-refs ${dir}/*/*\n" else "";
         };
 
       # Wraps a plain derivation with mkIncremental's outputs/restore/
@@ -50,10 +62,11 @@
           drv,
           phase,
           nuke ? true,
+          keepIncremental ? !(inputs.cache ? packages),
           extraPostInstall ? (_: ""),
         }:
         let
-          inc = mkIncremental { inherit name system cacheVars nuke; };
+          inc = mkIncremental { inherit name system cacheVars nuke keepIncremental; };
         in
         drv.overrideAttrs (
           old:
@@ -72,6 +85,13 @@
       # $out into text and (for gettext-style builds) into the
       # compiled binary, so they're not safe to restore across a
       # source-only patch. See README's "What's safe to cache".
+      #
+      # Always keeps the "incremental" output (keepIncremental = true,
+      # unconditionally) — `--cache-file` below is wired via
+      # `builtins.placeholder "incremental"`, a Nix-level
+      # substitution that only resolves for a real, declared output;
+      # unlike the plain env-var caches (ccache/Go/Zig), this
+      # mechanism has no scratch-dir fallback to opt out into.
       mkIncrementalAutotoolsPackage =
         {
           name,
@@ -83,6 +103,7 @@
         }:
         mkIncrementalPackage {
           inherit name system cacheVars nuke extraPostInstall;
+          keepIncremental = true;
           phase = "postPatch";
           drv = drv.overrideAttrs (old: {
             configureFlags = (old.configureFlags or [ ]) ++ [
@@ -164,19 +185,19 @@
                 export CCACHE_SLOPPINESS=random_seed
                 export CCACHE_COMPRESS=1
                 export CCACHE_UMASK=007
+                ${pkgs.ccache}/bin/ccache --dir "$CCACHE_DIR" --zero-stats > /dev/null
               '';
             postInstall =
               (prevAttrs.postInstall or "")
-              + (
-                if inc.isCached then
-                  ''
-                    ${pkgs.ccache}/bin/ccache --dir "$incremental" --show-stats
-                  ''
-                else
-                  ''
-                    ${pkgs.ccache}/bin/ccache --dir "$incremental" --zero-stats --show-stats
-                  ''
-              );
+              + ''
+                ${pkgs.ccache}/bin/ccache --dir "$CCACHE_DIR" --show-stats
+                hits=$(${pkgs.ccache}/bin/ccache --dir "$CCACHE_DIR" --print-stats | awk '$1=="direct_cache_hit"||$1=="preprocessed_cache_hit"{s+=$2}END{print s+0}')
+                misses=$(${pkgs.ccache}/bin/ccache --dir "$CCACHE_DIR" --print-stats | awk '$1=="cache_miss"{print $2+0}')
+                total=$((hits + misses))
+                pct=0
+                if [ "$total" -gt 0 ]; then pct=$((hits * 100 / total)); fi
+                echo "ccache[${prevAttrs.pname}]: $hits/$total hits ($pct%)"
+              '';
           }
         );
     in
@@ -194,29 +215,41 @@
           nixComponents = mkIncrementalNixComponents { inherit system; };
         in
         {
-          hello-ccache = mkIncrementalAutotoolsPackage {
-            name = "hello-ccache";
-            inherit system;
-            cacheVars = [ "CCACHE_DIR" ];
-            drv = (pkgs.hello.override { stdenv = pkgs.ccacheStdenv; }).overrideAttrs (old: {
-              postPatch = ''
-                export CCACHE_COMPRESS=1
-                export CCACHE_UMASK=007
-                export CCACHE_SLOPPINESS="random_seed"
-                export CCACHE_NOINODECACHE=1
-              '';
-            });
-            extraPostInstall =
-              isCached:
-              if isCached then
+          hello-ccache =
+            (mkIncrementalAutotoolsPackage {
+              name = "hello-ccache";
+              inherit system;
+              cacheVars = [ "CCACHE_DIR" ];
+              drv = (pkgs.hello.override { stdenv = pkgs.ccacheStdenv; }).overrideAttrs (old: {
+                postPatch = ''
+                  export CCACHE_COMPRESS=1
+                  export CCACHE_UMASK=007
+                  export CCACHE_SLOPPINESS="random_seed"
+                  export CCACHE_NOINODECACHE=1
+                '';
+              });
+              extraPostInstall =
+                _isCached:
                 ''
                   ${pkgs.ccache}/bin/ccache --dir "$incremental" --show-stats
-                ''
-              else
-                ''
-                  ${pkgs.ccache}/bin/ccache --dir "$incremental" --zero-stats --show-stats
+                  hits=$(${pkgs.ccache}/bin/ccache --dir "$incremental" --print-stats | awk '$1=="direct_cache_hit"||$1=="preprocessed_cache_hit"{s+=$2}END{print s+0}')
+                  misses=$(${pkgs.ccache}/bin/ccache --dir "$incremental" --print-stats | awk '$1=="cache_miss"{print $2+0}')
+                  total=$((hits + misses))
+                  pct=0
+                  if [ "$total" -gt 0 ]; then pct=$((hits * 100 / total)); fi
+                  echo "ccache[hello-ccache]: $hits/$total hits ($pct%)"
                 '';
-          };
+            }).overrideAttrs
+              (old: {
+                # inc.restore (which sets CCACHE_DIR) is appended
+                # last inside mkIncrementalAutotoolsPackage's own
+                # postPatch, so zeroing has to happen in one more
+                # layer after it, to isolate this build's own hits
+                # from history recorded in the restored cache.
+                postPatch = old.postPatch + ''
+                  ${pkgs.ccache}/bin/ccache --dir "$incremental" --zero-stats > /dev/null
+                '';
+              });
 
           golang = mkIncrementalPackage {
             name = "golang";

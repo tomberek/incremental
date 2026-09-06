@@ -110,3 +110,27 @@ restores a compiled artifact or path-bearing file. See
 caching beyond that, use `ccacheStdenv` rather than trying to skip
 `./configure`.
 
+## Chained rebuilds don't produce their own `incremental` output
+
+Building plain (no `cache` override) always produces an `incremental`
+output — that's what a later build restores from. But once a build
+is *itself* already restoring from an injected `cache` (i.e. you
+passed `--override-input cache ...`), it defaults to **not**
+producing its own `incremental` output — it still gets the full
+benefit of the restored cache (real ccache/GOCACHE/Zig-cache hits),
+it just doesn't leave behind a second, almost-never-read cache blob
+on top of the one it read from. Chaining `--override-input cache`
+three levels deep would otherwise leave three redundant multi-hundred-
+MB blobs in the store for no benefit.
+
+If you genuinely want to keep chaining past a restored build (e.g.
+build A, then B from A, then C from B, each hop the actual source of
+the next), pass `keepIncremental = true` to `mkIncremental` /
+`mkIncrementalPackage` for that call site to opt back in.
+
+`hello-ccache` is the one exception: it always keeps `incremental`,
+because `--cache-file` is wired via a Nix-level
+`builtins.placeholder "incremental"` substitution that requires a
+real declared output to resolve, unlike the plain env-var caches
+(ccache/Go/Zig), which have a scratch-dir fallback to opt out into.
+
