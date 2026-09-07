@@ -64,21 +64,23 @@ verify_edit rust rust/src/main.rs \
   bin/rust-example
 
 # hello-ccache wraps pkgs.hello unchanged, so its derivation is
-# byte-identical run to run and Nix substitutes rather than rebuilds —
-# --rebuild forces the actual build to run so the ccache report is real,
-# not skipped. --rebuild then does its own post-build determinism check,
-# which reports a false-positive "may not be deterministic" for any
-# ccache-backed output (ccache's own db isn't byte-reproducible between
-# runs) — the actual build and its log still happen before that check, so
-# the nonzero exit here is expected and not itself a failure.
+# byte-identical run to run and Nix would otherwise substitute instead of
+# rebuilding, skipping the ccache report entirely. Force a real rebuild by
+# deleting any already-valid output for the exact (cache-overridden)
+# derivation first — more portable than relying on --rebuild's own
+# double-build-and-diff behavior, which needs a prior valid build present
+# and behaves differently depending on what builders/substituters are
+# configured.
 nix build .#hello-ccache -o result-hello-ccache-cold
-log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#hello-ccache -o result-hello-ccache-warm --rebuild 2>&1 || true)
+warm_drv=$(nix path-info --derivation --override-input cache "git+file://$PWD?ref=HEAD" .#hello-ccache)
+nix store delete "$warm_drv" $(nix-store -q --outputs "$warm_drv" 2>/dev/null) 2>/dev/null || true
+log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#hello-ccache -o result-hello-ccache-warm 2>&1)
 hits=$(echo "$log" | grep -oP 'ccache\[hello-ccache\]: \K[0-9]+(?=/[0-9]+ hits)' || echo 0)
 if [ "${hits:-0}" -gt 0 ]; then
   echo "override-input-verify[hello-ccache]: OK ($hits ccache hits)"
 else
   echo "override-input-verify[hello-ccache]: FAILED — expected a nonzero ccache hit count, got:" >&2
-  echo "$log" | grep "ccache\[hello-ccache\]" >&2 || echo "(no ccache summary line found)" >&2
+  echo "$log" >&2
   failures=$((failures + 1))
 fi
 
