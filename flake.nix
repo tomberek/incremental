@@ -651,20 +651,7 @@
           target: (mkIncrementalNixComponents { inherit system target; }).${target}
         )
       ) inputs.nixpkgs.legacyPackages;
-      # Self-tests: build a package cold, then call its own withCache
-      # against that same cold build (synthesized as a `cache` attrset —
-      # no git/flake fetch needed) and check the result. A regression here
-      # previously slipped through as a real bug three times — nuke-refs
-      # silently skipped whenever restoring from a real cache (caught by
-      # nuke-refs-self-test, a minimal package whose build always writes
-      # a fresh store-path reference into its cache dir, so a skipped
-      # nuke leaks that reference into $incremental and Nix's own
-      # reference scanner rejects the output), ccache's env vars
-      # dropped by an outer overrideAttrs layer that withCache's default
-      # implementation doesn't see (caught by c-self-test's hit-rate
-      # assertion, which would silently read ~0% instead of ~100%), and
-      # Cargo's mtime-based fingerprinting serving a stale binary from a
-      # restored target/ dir (caught by rust-staleness-self-test).
+      # Self-tests for the caching mechanism itself — see README, "Checks".
       checks = builtins.mapAttrs (
         system: pkgs:
         let
