@@ -11,10 +11,6 @@
       lib = inputs.nixpkgs.lib;
 
       incrementalLib = import ./lib { inherit inputs; };
-      inherit (incrementalLib)
-        mkIncrementalPackage
-        mkIncrementalRustPackage
-        ;
     in
     {
       lib = incrementalLib;
@@ -86,97 +82,13 @@
       # Self-tests for the caching mechanism itself — see README, "Checks".
       checks = builtins.mapAttrs (
         system: pkgs:
-        let
-          coldC = inputs.self.packages.${system}.c;
-          coldNukeTest = mkIncrementalPackage {
-            name = "nuke-refs-self-test";
-            inherit system pkgs;
-            cacheVars = [ "REF_CACHE_DIR" ];
-            phase = "postPatch";
-            # References pkgs.hello on every build, cold or warm — a real
-            # store path a leftover restore script can't produce by luck.
-            # disallowedReferences makes Nix actually reject a leak instead
-            # of silently succeeding, matching what buildGoModule's own
-            # toolchain reference check does in practice (see README).
-            drv = pkgs.stdenvNoCC.mkDerivation {
-              name = "nuke-refs-self-test";
-              src = ./.;
-              dontUnpack = true;
-              disallowedReferences = [ pkgs.hello ];
-              installPhase = ''
-                runHook preInstall
-                mkdir -p $out "$REF_CACHE_DIR/objects"
-                echo "${pkgs.hello}" > "$REF_CACHE_DIR/objects/ref-$RANDOM"
-                runHook postInstall
-              '';
-            };
-          };
-          # Builds the same package from two different sources through the
-          # same cache slot and asserts the second binary reflects the
-          # second source — see the `rust` package above for why this can
-          # go wrong without checksum-freshness.
-          mkRustStalenessTest =
-            {
-              src,
-              cache ? inputs.cache,
-            }:
-            mkIncrementalRustPackage {
-              name = "rust-staleness-self-test";
-              inherit system pkgs cache;
-              drv = pkgs.rustPlatform.buildRustPackage {
-                name = "rust-staleness-self-test";
-                inherit src;
-                cargoLock = {
-                  lockFile = "${src}/Cargo.lock";
-                };
-                env.RUSTC_BOOTSTRAP = "1";
-                cargoBuildFlags = [ "-Zchecksum-freshness" ];
-                doCheck = false;
-              };
-            };
-          rustSrc =
-            text:
-            pkgs.runCommand "rust-staleness-src" { } ''
-              mkdir -p $out/src
-              cp ${./rust/Cargo.lock} $out/Cargo.lock
-              cp ${./rust/Cargo.toml} $out/Cargo.toml
-              echo 'fn main() { println!("${text}"); }' > $out/src/main.rs
-            '';
-          coldRustStalenessTest = mkRustStalenessTest { src = rustSrc "cold"; };
-        in
-        {
-          rust-staleness-self-test =
-            (mkRustStalenessTest {
-              src = rustSrc "warm";
-              cache = {
-                packages.${system}."rust-staleness-self-test".incremental = coldRustStalenessTest.incremental;
-              };
-            }).overrideAttrs
-              (old: {
-                postInstall = old.postInstall + ''
-                  out=$($out/bin/rust-example)
-                  echo "self-test[rust]: binary printed: $out"
-                  if [ "$out" != "warm" ]; then
-                    echo "self-test[rust]: FAILED — expected \"warm\", got a stale binary printing \"$out\"" >&2
-                    exit 1
-                  fi
-                '';
-              });
-          c-self-test =
-            (coldC.withCache { packages.${system}.c.incremental = coldC.incremental; }).overrideAttrs
-              (old: {
-                postInstall = old.postInstall + ''
-                  pct=$(cat $incremental/ccache-hit-pct)
-                  echo "self-test[c]: $pct% ccache hits restoring an unchanged build"
-                  if [ "$pct" -lt 90 ]; then
-                    echo "self-test[c]: FAILED — expected near-total hits" >&2
-                    exit 1
-                  fi
-                '';
-              });
-          nuke-refs-self-test = coldNukeTest.withCache {
-            packages.${system}."nuke-refs-self-test".incremental = coldNukeTest.incremental;
-          };
+        import ./checks {
+          inherit
+            inputs
+            system
+            pkgs
+            incrementalLib
+            ;
         }
       ) inputs.nixpkgs.legacyPackages;
     };
