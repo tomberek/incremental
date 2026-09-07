@@ -12,15 +12,8 @@
 
       incrementalLib = import ./lib { inherit inputs; };
       inherit (incrementalLib)
-        mkIncremental
         mkIncrementalPackage
-        mkIncrementalAutotoolsPackage
-        mkIncrementalGoPackage
-        mkIncrementalZigPackage
         mkIncrementalRustPackage
-        ccacheEnv
-        mkIncrementalCcachePackage
-        mkIncrementalNixComponents
         ;
     in
     {
@@ -80,130 +73,15 @@
       }) inputs.nixpkgs.legacyPackages;
       packages = builtins.mapAttrs (
         system: pkgs:
-        let
-          nixComponentNames = [
-            "nix-util"
-            "nix-util-c"
-            "nix-store"
-            "nix-store-c"
-            "nix-fetchers"
-            "nix-fetchers-c"
-            "nix-expr"
-            "nix-expr-c"
-            "nix-flake"
-            "nix-flake-c"
-            "nix-main"
-            "nix-main-c"
-            "nix-cmd"
-          ];
-        in
-        {
-          hello-ccache =
-            let
-              mkHelloCcache =
-                cache:
-                let
-                  env = ccacheEnv {
-                    inherit pkgs;
-                    pname = "hello-ccache";
-                    dir = "$incremental";
-                    debugDir = "$incremental/debug-logs";
-                  };
-                in
-                (mkIncrementalAutotoolsPackage {
-                  name = "hello-ccache";
-                  inherit system cache pkgs;
-                  cacheVars = [ "CCACHE_DIR" ];
-                  drv = pkgs.hello.override { stdenv = pkgs.ccacheStdenv; };
-                  extraPostInstall = _isCached: env.report;
-                }).overrideAttrs
-                  (old: {
-                    postPatch = old.postPatch + env.setup;
-                    # Overrides the inherited passthru.withCache from
-                    # mkIncrementalPackage, which would skip env.setup above.
-                    passthru = old.passthru // {
-                      withCache =
-                        cacheFlake:
-                        mkHelloCcache (if builtins.isString cacheFlake then builtins.getFlake cacheFlake else cacheFlake);
-                    };
-                  });
-            in
-            mkHelloCcache inputs.cache;
-
-          golang = mkIncrementalGoPackage {
-            name = "golang";
-            inherit system pkgs;
-            drv = pkgs.buildGoModule {
-              name = "golang";
-              src = pkgs.lib.cleanSource ./golang;
-              vendorHash = "sha256-5xR9WCkpPpY9D0LR2mcdoOX34RqVpxJjgRwc4GEkGiE=";
-            };
-          };
-
-          # Worked example for mkIncrementalCcachePackage: plain C, no build system.
-          c = mkIncrementalCcachePackage {
-            name = "c";
-            inherit system pkgs;
-            phase = "postPatch"; # dontConfigure skips configurePhase, so preConfigure would too
-            drv = pkgs.ccacheStdenv.mkDerivation {
-              name = "c";
-              src = pkgs.lib.cleanSource ./c;
-              dontConfigure = true;
-              buildPhase = ''
-                runHook preBuild
-                $CC -c a.c -o a.o
-                $CC -c b.c -o b.o
-                $CC -c main.c -o main.o
-                $CC a.o b.o main.o -o c
-                runHook postBuild
-              '';
-              installPhase = ''
-                runHook preInstall
-                mkdir -p $out/bin
-                cp c $out/bin/
-                runHook postInstall
-              '';
-            };
-          };
-
-          zig = mkIncrementalZigPackage {
-            name = "zig";
-            inherit system pkgs;
-            drv = pkgs.stdenvNoCC.mkDerivation {
-              name = "zig";
-              src = pkgs.lib.cleanSource ./zig;
-              nativeBuildInputs = [ pkgs.zig.hook ];
-            };
-          };
-
-          rust = mkIncrementalRustPackage {
-            name = "rust";
-            inherit system pkgs;
-            drv = pkgs.rustPlatform.buildRustPackage {
-              name = "rust";
-              src = pkgs.lib.cleanSource ./rust;
-              cargoLock = {
-                lockFile = ./rust/Cargo.lock;
-              };
-              # Nix normalizes unpacked source mtimes to the epoch, so
-              # Cargo's mtime-based fingerprinting sees "unchanged" every
-              # rebuild and serves a stale binary. checksum-freshness
-              # switches it to content-hash staleness (ccache's own fix,
-              # same reason) — unstable, needs RUSTC_BOOTSTRAP on stable.
-              env.RUSTC_BOOTSTRAP = "1";
-              cargoBuildFlags = [ "-Zchecksum-freshness" ];
-            };
-          };
-
-          nix-incremental =
-            (mkIncrementalNixComponents {
-              inherit system;
-              target = "nix-cli";
-            }).nix-cli;
+        import ./pkgs {
+          inherit
+            inputs
+            lib
+            system
+            pkgs
+            incrementalLib
+            ;
         }
-        // lib.genAttrs nixComponentNames (
-          target: (mkIncrementalNixComponents { inherit system target; }).${target}
-        )
       ) inputs.nixpkgs.legacyPackages;
       # Self-tests for the caching mechanism itself — see README, "Checks".
       checks = builtins.mapAttrs (
