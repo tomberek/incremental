@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@main
       - run: nix flake check -L
       - run: nix build .#c .#hello-ccache .#golang .#zig .#rust -L
