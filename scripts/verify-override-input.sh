@@ -67,14 +67,13 @@ verify_edit rust rust/src/main.rs \
 # byte-identical run to run and Nix would otherwise substitute instead of
 # rebuilding, skipping the ccache report entirely. Force a real rebuild by
 # deleting any already-valid output for the exact (cache-overridden)
-# derivation first — more portable than relying on --rebuild's own
-# double-build-and-diff behavior, which needs a prior valid build present
-# and behaves differently depending on what builders/substituters are
-# configured.
+# derivation first, and disabling remote builders for this one build — a
+# configured remote builder can still have (and hand back) the same
+# output even after it's deleted locally.
 nix build .#hello-ccache -o result-hello-ccache-cold
 warm_drv=$(nix path-info --derivation --override-input cache "git+file://$PWD?ref=HEAD" .#hello-ccache)
 nix store delete "$warm_drv" $(nix-store -q --outputs "$warm_drv" 2>/dev/null) 2>/dev/null || true
-log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#hello-ccache -o result-hello-ccache-warm 2>&1)
+log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#hello-ccache -o result-hello-ccache-warm --builders "" 2>&1)
 hits=$(echo "$log" | grep -oP 'ccache\[hello-ccache\]: \K[0-9]+(?=/[0-9]+ hits)' || echo 0)
 if [ "${hits:-0}" -gt 0 ]; then
   echo "override-input-verify[hello-ccache]: OK ($hits ccache hits)"
