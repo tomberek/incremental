@@ -305,10 +305,16 @@ workflow documented above, for real, for every example. For each of
 unique marker, rebuilds via `--override-input`, and asserts the
 marker actually shows up when running the binary (reverting the edit
 either way). `hello-ccache` has no source to edit, so it instead
-forces a real rebuild with `--rebuild` (its derivation is otherwise
-byte-identical run to run, so Nix would just substitute) and asserts
-a nonzero ccache hit count. CI runs both this and `nix flake check`
-on every push.
+deletes its existing output and forces a fully local rebuild (its
+derivation is otherwise byte-identical run to run, so Nix — or a
+configured remote builder — would just hand back the old output) and
+asserts a nonzero ccache hit count. CI runs both this and
+`nix flake check` on every push.
+
+The `nix-*` component packages and `nix-incremental` (full NixOS/nix
+builds) are excluded from that on-push CI — too expensive to run on
+every commit. `nix-components.yml` builds them instead on manual
+`workflow_dispatch`, for periodic/on-demand coverage.
 
 ## Chained rebuilds don't produce their own `incremental` output
 
