@@ -149,67 +149,55 @@
           });
         };
 
+      # Both Go and Zig just need mkIncrementalPackage with a fixed
+      # cacheVars/phase baked in — this factory is that shape once,
+      # shared by the two definitions below.
+      mkEcosystemPackage =
+        { cacheVars, phase }:
+        {
+          name,
+          system,
+          pkgs,
+          drv,
+          cache ? inputs.cache,
+          nuke ? true,
+          keepIncremental ? !(cache ? packages),
+          extraPostInstall ? (_: ""),
+        }:
+        mkIncrementalPackage {
+          inherit
+            name
+            system
+            pkgs
+            drv
+            cache
+            nuke
+            keepIncremental
+            extraPostInstall
+            cacheVars
+            phase
+            ;
+        };
+
       # buildGoModule's own configurePhase sets $GOCACHE and only then
       # runs postConfigure — mkIncrementalPackage's `phase` argument must
       # be exactly that hook, so bake it in rather than making every
       # caller rediscover it.
-      mkIncrementalGoPackage =
-        {
-          name,
-          system,
-          pkgs,
-          drv,
-          cache ? inputs.cache,
-          nuke ? true,
-          keepIncremental ? !(cache ? packages),
-          extraPostInstall ? (_: ""),
-        }:
-        mkIncrementalPackage {
-          inherit
-            name
-            system
-            pkgs
-            drv
-            cache
-            nuke
-            keepIncremental
-            extraPostInstall
-            ;
-          cacheVars = [ "GOCACHE" ];
-          phase = "postConfigure";
-        };
+      mkIncrementalGoPackage = mkEcosystemPackage {
+        cacheVars = [ "GOCACHE" ];
+        phase = "postConfigure";
+      };
 
       # zig.hook's zigConfigurePhase only ever reassigns
       # ZIG_GLOBAL_CACHE_DIR, never ZIG_LOCAL_CACHE_DIR — so both must be
       # exported before configurePhase runs, i.e. in preConfigure.
-      mkIncrementalZigPackage =
-        {
-          name,
-          system,
-          pkgs,
-          drv,
-          cache ? inputs.cache,
-          nuke ? true,
-          keepIncremental ? !(cache ? packages),
-          extraPostInstall ? (_: ""),
-        }:
-        mkIncrementalPackage {
-          inherit
-            name
-            system
-            pkgs
-            drv
-            cache
-            nuke
-            keepIncremental
-            extraPostInstall
-            ;
-          cacheVars = [
-            "ZIG_LOCAL_CACHE_DIR"
-            "ZIG_GLOBAL_CACHE_DIR"
-          ];
-          phase = "preConfigure";
-        };
+      mkIncrementalZigPackage = mkEcosystemPackage {
+        cacheVars = [
+          "ZIG_LOCAL_CACHE_DIR"
+          "ZIG_GLOBAL_CACHE_DIR"
+        ];
+        phase = "preConfigure";
+      };
 
       # buildRustPackage's cargoInstallHook looks for a fixed *relative*
       # path (`target/<subdir>/<buildType>`), not $CARGO_TARGET_DIR — so
