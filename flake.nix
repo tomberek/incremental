@@ -9,6 +9,11 @@
     let
       lib = inputs.nixpkgs.lib;
 
+      # withCache accepts either a rev-pinned flake ref (fetched here) or
+      # an already-fetched flake attrset directly (e.g. from `checks`,
+      # where there's no ref to fetch).
+      resolveCache = cacheFlake: if builtins.isString cacheFlake then builtins.getFlake cacheFlake else cacheFlake;
+
       # Restores a previous build's `incremental` output (from `cache`,
       # normally overridden to an earlier checkout) and exports cacheVars
       # pointing at it.
@@ -113,7 +118,7 @@
                     extraPostInstall
                     ;
                   keepIncremental = inc.keepIncremental;
-                  cache = if builtins.isString cacheFlake then builtins.getFlake cacheFlake else cacheFlake;
+                  cache = resolveCache cacheFlake;
                 };
             };
           }
@@ -257,7 +262,7 @@
                     extraPostInstall
                     ;
                   keepIncremental = inc.keepIncremental;
-                  cache = if builtins.isString cacheFlake then builtins.getFlake cacheFlake else cacheFlake;
+                  cache = resolveCache cacheFlake;
                 };
             };
           });
@@ -367,7 +372,7 @@
                     nuke
                     ;
                   keepIncremental = inc.keepIncremental;
-                  cache = if builtins.isString cacheFlake then builtins.getFlake cacheFlake else cacheFlake;
+                  cache = resolveCache cacheFlake;
                 };
             };
           });
@@ -567,9 +572,7 @@
                     # Overrides the inherited passthru.withCache from
                     # mkIncrementalPackage, which would skip env.setup above.
                     passthru = old.passthru // {
-                      withCache =
-                        cacheFlake:
-                        mkHelloCcache (if builtins.isString cacheFlake then builtins.getFlake cacheFlake else cacheFlake);
+                      withCache = cacheFlake: mkHelloCcache (resolveCache cacheFlake);
                     };
                   });
             in
