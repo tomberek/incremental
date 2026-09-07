@@ -9,23 +9,15 @@
     let
       lib = inputs.nixpkgs.lib;
 
-      # withCache accepts either a rev-pinned flake ref (fetched here) or
-      # an already-fetched flake attrset directly (e.g. from `checks`,
-      # where there's no ref to fetch).
+      # Accepts a rev-pinned flake ref (fetched here) or an already-fetched
+      # flake attrset (e.g. from `checks`, where there's no ref to fetch).
       resolveCache = cacheFlake: if builtins.isString cacheFlake then builtins.getFlake cacheFlake else cacheFlake;
 
-      # Restores a previous build's `incremental` output (from `cache`,
-      # normally overridden to an earlier checkout) and exports cacheVars
-      # pointing at it.
-      #
-      # `outputs` always includes "incremental", even when the cache dir
-      # lives elsewhere (see keepIncremental) — a varying outputs list
-      # changes the derivation hash, which changes every -I/-isystem flag
-      # a dependent embeds it in, breaking their caching too.
-      #
-      # keepIncremental defaults off once already restoring from `cache`,
-      # to avoid leaving a redundant cache blob on top of the one just
-      # read. Pass `keepIncremental = true` to keep producing a real one.
+      # Restores a build's `incremental` output (from `cache`) and exports
+      # cacheVars pointing at it. `outputs` always includes "incremental" —
+      # a varying outputs list changes the derivation hash, breaking
+      # dependents' -I/-isystem-keyed caching. keepIncremental defaults off
+      # once already restoring from `cache`, to skip a redundant cache blob.
       mkIncremental =
         {
           name, # key into cache.packages.${system}
@@ -64,10 +56,9 @@
           nukeScript = if keepIncremental && nuke then "nuke-refs ${dir}/*/*\n" else "";
         };
 
-      # `phase` is whichever hook runs before the tool reads its cache
-      # dir. Required, not defaulted: buildGoModule's own configurePhase
-      # sets $GOCACHE and only then runs postConfigure, so golang needs
-      # that specific hook.
+      # `phase` is whichever hook runs before the tool reads its cache dir.
+      # Required: e.g. buildGoModule's own configurePhase sets $GOCACHE and
+      # only then runs postConfigure, so golang needs that specific hook.
       mkIncrementalPackage =
         {
           name,
@@ -75,7 +66,7 @@
           cacheVars,
           drv,
           phase,
-          pkgs, # nuke-refs comes from here — see nukeScript below
+          pkgs, # nuke-refs comes from here
           cache ? inputs.cache,
           nuke ? true,
           keepIncremental ? !(cache ? packages),
@@ -93,14 +84,9 @@
             # callers can't forget it and hit "command not found" the one
             # time `nuke` actually fires (e.g. once keepIncremental flips).
             nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ lib.optional nuke pkgs.nukeReferences;
-            # Lets a third party restore from a build of theirs without touching
-            # their own flake inputs: `pkg.withCache "git+file://...?rev=<sha>"`.
-            # Needs a rev-pinned ref — builtins.getFlake requires locked input
-            # under pure eval, same as any flake input resolution. Also
-            # accepts an already-fetched flake (an attrset) directly, e.g.
-            # from `checks` (see below), where there's no ref to fetch.
-            #
-            # keepIncremental is carried over explicitly (not re-defaulted) —
+            # Restores from a build of a third party's own without touching
+            # their flake inputs: `pkg.withCache "git+file://...?rev=<sha>"`.
+            # keepIncremental is carried over explicitly, not re-defaulted —
             # it must stay fixed regardless of which cache is passed in, same
             # reason `outputs` must stay structurally constant (see above).
             passthru = (old.passthru or { }) // {
@@ -127,11 +113,10 @@
           }
         );
 
-      # Adds autoconf's --cache-file so AC_CHECK_*/AC_TRY_* results
-      # survive rebuilds. Never touches config.status/Makefile/config.h —
-      # those bake $out into text (and sometimes into the compiled
-      # binary), so they're not safe to restore across a source patch.
-      # See README, "What's safe to cache".
+      # Adds autoconf's --cache-file so AC_CHECK_*/AC_TRY_* results survive
+      # rebuilds. Never touches config.status/Makefile/config.h — those
+      # bake $out into text (or the compiled binary), unsafe to restore
+      # across a source patch. See README, "What's safe to cache".
       mkIncrementalAutotoolsPackage =
         {
           name,
@@ -154,9 +139,8 @@
           });
         };
 
-      # Both Go and Zig just need mkIncrementalPackage with a fixed
-      # cacheVars/phase baked in — this factory is that shape once,
-      # shared by the two definitions below.
+      # Go and Zig both just need mkIncrementalPackage with a fixed
+      # cacheVars/phase — shared shape for the two definitions below.
       mkEcosystemPackage =
         { cacheVars, phase }:
         {
@@ -298,15 +282,10 @@
           '';
         };
 
-      # Add ccache caching to a package: mkIncrementalCcachePackage
-      # { name, system, pkgs, drv, phase }. `drv` must already be built
-      # with ccacheStdenv (a plain stdenv.mkDerivation has no .override
-      # for swapping it in after the fact); the assert below catches a
-      # missing ccacheStdenv at eval time instead of a sandbox
-      # "Permission denied" during the build.
-      #
-      # `phase`: same rule as mkIncrementalPackage — use postPatch if the
-      # package skips configurePhase (dontConfigure or similar).
+      # `drv` must already be built with ccacheStdenv (a plain
+      # stdenv.mkDerivation has no .override for swapping it in after the
+      # fact); the assert catches a missing ccacheStdenv at eval time
+      # instead of a sandbox "Permission denied" during the build.
       mkIncrementalCcachePackage =
         {
           name,
@@ -377,26 +356,25 @@
             };
           });
 
-      # NixOS/nix's flake splits `nix` into ~14 Meson/Ninja component
-      # derivations (nix-util, nix-store, nix-expr, ...) sharing a scope
-      # with overrideAllMesonComponents: an overlay applied to every
-      # component, so building nix-cli applies it underneath too.
-      #
-      # withUnityBuild = false: unity builds merge many .cc files into
-      # one translation unit, wrecking ccache's per-file hit rate.
-      # withAWS = false on nix-store: aws-crt-cpp resolves via CMake,
-      # whose compiler-detection breaks under a swapped ccacheStdenv.
+      # NixOS/nix's flake splits `nix` into ~14 Meson/Ninja components
+      # sharing a scope via overrideAllMesonComponents — an overlay
+      # applied to every component, so building nix-cli applies it
+      # underneath too. withUnityBuild = false: unity builds merge many
+      # .cc files into one translation unit, wrecking ccache's per-file
+      # hit rate. withAWS = false on nix-store: aws-crt-cpp resolves via
+      # CMake, whose compiler-detection breaks under a swapped
+      # ccacheStdenv.
       #
       # Only `target` gets a cache-varying restore script; every
       # dependency gets a fixed one. `cache` is a nested evaluation of
-      # this same flake with its own `cache` input — if a shared
-      # dependency's script varied with caching state, it would build a
-      # different derivation (different `dev` output path) inside
-      # `cache`'s tree vs. the target's tree, and dependents embed that
-      # path in every -I/-isystem flag, turning every file into a miss
-      # regardless of actual source changes. Tradeoff: only the
-      # component you're building gets cross-build ccache hits; its
-      # dependencies fall back to plain store substitution.
+      # this same flake with its own `cache` input — if a dependency's
+      # script varied with caching state, it would build a different
+      # derivation (different `dev` output path) in `cache`'s tree vs.
+      # the target's tree, and dependents embed that path in every
+      # -I/-isystem flag, turning every file into a miss regardless of
+      # actual source changes. Tradeoff: only the component you're
+      # building gets cross-build ccache hits; dependencies fall back
+      # to plain store substitution.
       mkIncrementalNixComponents =
         { system, target }:
         let
@@ -480,12 +458,9 @@
         };
       }) inputs.nixpkgs.legacyPackages;
       # Wraps `nix build --expr '(builtins.getFlake ...).<attrpath>.withCache "<cacheRef>"'`
-      # so a third party can restore from a prior build without --impure or
-      # editing their own flake.nix — `withCache` needs a rev-pinned ref, so
-      # that inner eval stays pure. A bare `<flake-ref>#name` (no dots)
-      # expands to `packages.<system>.name`, matching `nix build`'s own
-      # shorthand; a dotted path (e.g. `checks.x86_64-linux.foo`) is used
-      # as given.
+      # for a third party without --impure or editing their own flake.nix.
+      # A bare `<flake-ref>#name` (no dots) expands to
+      # `packages.<system>.name`; a dotted path is used as given.
       apps = builtins.mapAttrs (system: pkgs: {
         with-cache = {
           type = "app";
@@ -631,12 +606,11 @@
               name = "rust";
               src = pkgs.lib.cleanSource ./rust;
               cargoLock = { lockFile = ./rust/Cargo.lock; };
-              # Nix normalizes every unpacked source file's mtime to the
-              # epoch, so Cargo's default mtime-based fingerprinting sees
-              # "unchanged" on every rebuild and serves a stale binary.
-              # checksum-freshness switches Cargo to content-hash-based
-              # staleness detection (same fix ccache needed for the same
-              # reason) — unstable, so needs RUSTC_BOOTSTRAP on stable.
+              # Nix normalizes unpacked source mtimes to the epoch, so
+              # Cargo's mtime-based fingerprinting sees "unchanged" every
+              # rebuild and serves a stale binary. checksum-freshness
+              # switches it to content-hash staleness (ccache's own fix,
+              # same reason) — unstable, needs RUSTC_BOOTSTRAP on stable.
               env.RUSTC_BOOTSTRAP = "1";
               cargoBuildFlags = [ "-Zchecksum-freshness" ];
             };
@@ -679,13 +653,10 @@
               '';
             };
           };
-          # Cargo's default fingerprinting is mtime-based, and Nix
-          # normalizes every unpacked source file's mtime to the epoch —
-          # so restoring a `target` dir from a build of *different*
-          # source can serve a stale binary unless checksum-freshness
-          # (or an equivalent) is on. This builds the same package from
-          # two genuinely different sources through the same cache slot
-          # and asserts the second binary reflects the second source.
+          # Builds the same package from two different sources through the
+          # same cache slot and asserts the second binary reflects the
+          # second source — see the `rust` package above for why this can
+          # go wrong without checksum-freshness.
           mkRustStalenessTest =
             { src, cache ? inputs.cache }:
             mkIncrementalRustPackage {
