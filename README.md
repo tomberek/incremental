@@ -61,12 +61,12 @@ nix build --expr \
    in pkg.withCache "<cache-flake-ref>"'
 ```
 
-`mkIncrementalGoPackage` and `mkIncrementalZigPackage` bake in the
-right `cacheVars`/`phase` for those ecosystems (see "Examples in this
-repo" below for why each needs what it needs). For anything else —
-autoconf's `--cache-file`, a second cache tool doesn't have a wrapper
-for — compose `mkIncrementalPackage`/`mkIncrementalAutotoolsPackage`
-directly.
+`mkIncrementalGoPackage`, `mkIncrementalZigPackage`, and
+`mkIncrementalRustPackage` bake in the right `cacheVars`/`phase` for
+those ecosystems (see "Examples in this repo" below for why each
+needs what it needs). For anything else — autoconf's `--cache-file`,
+a second cache tool doesn't have a wrapper for — compose
+`mkIncrementalPackage`/`mkIncrementalAutotoolsPackage` directly.
 
 ## Examples in this repo
 
@@ -92,6 +92,34 @@ both vars are exported earlier, in `preConfigure`.
 $ nix build .#zig
 echo "// hi" >> zig/main.zig
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#zig
+```
+
+### Rust
+
+Uses `mkIncrementalRustPackage`, which restores Cargo's own build
+cache (`CARGO_TARGET_DIR`) — but pointing that at a restored dir isn't
+enough on its own. `buildRustPackage`'s `cargoInstallHook` looks for a
+fixed *relative* path (`target/<subdir>/<buildType>`), not
+`$CARGO_TARGET_DIR`, so the wrapper symlinks `./target` to the
+restored dir in `preBuild` instead of exporting an env var.
+
+More importantly: Cargo's default fingerprinting is mtime-based, and
+Nix normalizes every unpacked source file's mtime to the epoch, so a
+restored `target/` looks "fresh" to Cargo regardless of what actually
+changed — the same failure mode this repo already avoids for
+Autotools by not caching `config.status`. The fix here is Cargo's
+`-Zchecksum-freshness` (unstable, unlocked on stable via
+`RUSTC_BOOTSTRAP=1`), which switches Cargo to content-hash-based
+staleness detection, the same fix ccache needed for the same reason.
+`mkIncrementalRustPackage`'s example sets both; a `buildRustPackage`
+without them would silently serve stale binaries when restoring from
+a cache built from different source — the `rust-staleness-self-test`
+check catches exactly this.
+
+```
+$ nix build .#rust
+echo '// hi' >> rust/src/main.rs
+$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#rust
 ```
 
 ### ccache (hello-ccache)
@@ -239,8 +267,8 @@ rather than trying to skip `./configure`.
 
 ## Checks
 
-`nix flake check` builds two self-tests that catch regressions in the
-caching mechanism itself, not in any particular package:
+`nix flake check` builds three self-tests that catch regressions in
+the caching mechanism itself, not in any particular package:
 
 - `c-self-test` builds `c` cold, then calls its own `withCache` against
   that same build and asserts the ccache hit rate stays near 100% —
@@ -252,11 +280,18 @@ caching mechanism itself, not in any particular package:
   `disallowedReferences = [ pkgs.hello ]` — this is what caught a real
   bug where `nuke-refs` was skipped whenever restoring from a real
   cache, letting a fresh reference leak into the persisted output.
+- `rust-staleness-self-test` builds a minimal Rust binary with source
+  "cold", then restores that build's cache while building from
+  different source that prints "warm", and asserts the binary
+  actually prints "warm" — this is what caught a real bug where
+  Cargo's mtime-based fingerprinting served a stale binary from a
+  restored `target/` dir regardless of what source changed, before
+  `mkIncrementalRustPackage` added `-Zchecksum-freshness`.
 
-Both synthesize a `cache` attrset directly from the cold build's own
-`.incremental` output (`withCache` accepts either a rev-pinned flake
-ref or an already-fetched flake), so the check needs no git/network
-access and stays hermetic under the build sandbox.
+All three synthesize a `cache` attrset directly from a cold build's
+own `.incremental` output (`withCache` accepts either a rev-pinned
+flake ref or an already-fetched flake), so none of them needs
+git/network access, and all stay hermetic under the build sandbox.
 
 ## Chained rebuilds don't produce their own `incremental` output
 

@@ -211,6 +211,69 @@
           phase = "preConfigure";
         };
 
+      # buildRustPackage's cargoInstallHook looks for a fixed *relative*
+      # path (`target/<subdir>/<buildType>`), not $CARGO_TARGET_DIR — so
+      # unlike Go/Zig, the restored dir has to be symlinked to `./target`
+      # rather than exported as an env var. cargoBuildHook's `runHook
+      # preBuild` (right before `cargo build`) is still the right point
+      # to do that, before anything reads the target dir.
+      mkIncrementalRustPackage =
+        {
+          name,
+          system,
+          pkgs,
+          drv,
+          cache ? inputs.cache,
+          nuke ? true,
+          keepIncremental ? !(cache ? packages),
+          extraPostInstall ? (_: ""),
+        }:
+        let
+          inc = mkIncremental {
+            inherit
+              name
+              system
+              cache
+              nuke
+              keepIncremental
+              ;
+            cacheVars = [ ];
+          };
+        in
+        (mkIncrementalPackage {
+          inherit
+            name
+            system
+            pkgs
+            drv
+            cache
+            nuke
+            keepIncremental
+            extraPostInstall
+            ;
+          cacheVars = [ ];
+          phase = "preBuild";
+        }).overrideAttrs
+          (old: {
+            preBuild = old.preBuild + "ln -sfn ${inc.dir} target\n";
+            passthru = old.passthru // {
+              withCache =
+                cacheFlake:
+                mkIncrementalRustPackage {
+                  inherit
+                    name
+                    system
+                    pkgs
+                    drv
+                    nuke
+                    extraPostInstall
+                    ;
+                  keepIncremental = inc.keepIncremental;
+                  cache = if builtins.isString cacheFlake then builtins.getFlake cacheFlake else cacheFlake;
+                };
+            };
+          });
+
       # Shared ccache env/report shell.
       ccacheEnv =
         { pkgs, pname, dir, debugDir }:
@@ -410,6 +473,7 @@
           mkIncrementalAutotoolsPackage
           mkIncrementalGoPackage
           mkIncrementalZigPackage
+          mkIncrementalRustPackage
           ccacheEnv
           mkIncrementalCcachePackage
           mkIncrementalNixComponents
@@ -569,6 +633,24 @@
             };
           };
 
+          rust = mkIncrementalRustPackage {
+            name = "rust";
+            inherit system pkgs;
+            drv = pkgs.rustPlatform.buildRustPackage {
+              name = "rust";
+              src = pkgs.lib.cleanSource ./rust;
+              cargoLock = { lockFile = ./rust/Cargo.lock; };
+              # Nix normalizes every unpacked source file's mtime to the
+              # epoch, so Cargo's default mtime-based fingerprinting sees
+              # "unchanged" on every rebuild and serves a stale binary.
+              # checksum-freshness switches Cargo to content-hash-based
+              # staleness detection (same fix ccache needed for the same
+              # reason) — unstable, so needs RUSTC_BOOTSTRAP on stable.
+              env.RUSTC_BOOTSTRAP = "1";
+              cargoBuildFlags = [ "-Zchecksum-freshness" ];
+            };
+          };
+
           nix-incremental = (mkIncrementalNixComponents {
             inherit system;
             target = "nix-cli";
@@ -617,8 +699,58 @@
               '';
             };
           };
+          # Cargo's default fingerprinting is mtime-based, and Nix
+          # normalizes every unpacked source file's mtime to the epoch —
+          # so restoring a `target` dir from a build of *different*
+          # source can serve a stale binary unless checksum-freshness
+          # (or an equivalent) is on. This builds the same package from
+          # two genuinely different sources through the same cache slot
+          # and asserts the second binary reflects the second source.
+          mkRustStalenessTest =
+            { src, cache ? inputs.cache }:
+            mkIncrementalRustPackage {
+              name = "rust-staleness-self-test";
+              inherit system pkgs cache;
+              drv = pkgs.rustPlatform.buildRustPackage {
+                name = "rust-staleness-self-test";
+                inherit src;
+                cargoLock = { lockFile = "${src}/Cargo.lock"; };
+                env.RUSTC_BOOTSTRAP = "1";
+                cargoBuildFlags = [ "-Zchecksum-freshness" ];
+                doCheck = false;
+              };
+            };
+          rustSrc =
+            text:
+            pkgs.runCommand "rust-staleness-src" { } ''
+              mkdir -p $out/src
+              cp ${./rust/Cargo.lock} $out/Cargo.lock
+              cp ${./rust/Cargo.toml} $out/Cargo.toml
+              echo 'fn main() { println!("${text}"); }' > $out/src/main.rs
+            '';
+          coldRustStalenessTest = mkRustStalenessTest { src = rustSrc "cold"; };
         in
         {
+          rust-staleness-self-test =
+            (mkRustStalenessTest {
+              src = rustSrc "warm";
+              cache = {
+                packages.${system}."rust-staleness-self-test".incremental =
+                  coldRustStalenessTest.incremental;
+              };
+            }).overrideAttrs
+              (old: {
+                postInstall =
+                  old.postInstall
+                  + ''
+                    out=$($out/bin/rust-example)
+                    echo "self-test[rust]: binary printed: $out"
+                    if [ "$out" != "warm" ]; then
+                      echo "self-test[rust]: FAILED — expected \"warm\", got a stale binary printing \"$out\"" >&2
+                      exit 1
+                    fi
+                  '';
+              });
           c-self-test =
             (coldC.withCache { packages.${system}.c.incremental = coldC.incremental; }).overrideAttrs
               (old: {

@@ -1,0 +1,8 @@
+[package]
+name = "rust-example"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rust-example"
+path = "src/main.rs"
