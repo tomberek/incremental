@@ -224,6 +224,24 @@ nix build .#nix-fetchers \
   -L
 ```
 
+`scripts/build-with-cache.sh` automates that pairing for the common
+case of building a "base" ref first and a "target" ref against it —
+e.g. seeding the cache from `master` and building a PR branch against
+it, so the PR build only recompiles what the PR actually touches:
+
+```
+scripts/build-with-cache.sh \
+  ".#nix-incremental" --override-input nix github:NixOS/nix/master \
+  -- \
+  ".#nix-incremental" --override-input nix github:NixOS/nix/pull/16428/merge
+```
+
+It mirrors every `--override-input` given to the base build onto
+`cache/<name>` for the target build, so `cache` is evaluated with the
+exact inputs base was actually built with — not a `follows`, which
+would be wrong here: base and target are supposed to use different
+`nix` revisions, and a `follows` would silently force them to match.
+
 Three adjustments from NixOS/nix's own defaults:
 
 - `withUnityBuild = false` — Meson's unity-build feature merges many
