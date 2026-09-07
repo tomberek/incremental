@@ -32,5 +32,10 @@ in
   rust = import ./rust.nix { inherit system pkgs mkIncrementalRustPackage; };
 }
 // import ./nix-components.nix {
-  inherit lib system mkIncrementalNixComponents;
+  inherit
+    lib
+    pkgs
+    system
+    mkIncrementalNixComponents
+    ;
 }

@@ -185,6 +185,18 @@ Each component (`nix-util`, `nix-store`, `nix-fetchers`, `nix-expr`,
 `nix-flake`, `nix-main`, `nix-cmd`, and their `-c` variants) is its own
 package; `nix-incremental` builds the full CLI.
 
+**Want every component to individually benefit from caching, not just
+whichever one you name?** Build `nix-all-components` instead of
+`nix-incremental` — it's every component built as its own top-level
+target (via `symlinkJoin`), so each keeps its own cache-varying
+restore script and reports its own hit rate, instead of `nix-cli`
+pulling them in as fixed-script dependencies:
+
+```
+$ nix build .#nix-all-components
+$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nix-all-components
+```
+
 **Only the component you're building gets a cache-varying restore
 script — every dependency gets a fixed one.** `cache` is a full nested
 evaluation of this same flake with its own `cache` input. If a shared

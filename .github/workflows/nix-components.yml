@@ -12,4 +12,4 @@ jobs:
         with:
           fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@main
-      - run: nix build .#nix-incremental .#nix-util .#nix-store -L
+      - run: nix build .#nix-incremental .#nix-all-components -L
