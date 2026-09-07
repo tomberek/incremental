@@ -12,3 +12,4 @@ jobs:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
       - run: nix flake check -L
+      - run: nix build .#c .#hello-ccache .#golang .#zig .#rust -L
