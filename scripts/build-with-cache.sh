@@ -15,6 +15,7 @@
 #     ".#nix-incremental" --override-input nix github:NixOS/nix/pull/16428/merge
 set -euo pipefail
 
+self="$(basename "$0")"
 base_args=()
 target_args=()
 in_target=0
@@ -31,7 +32,7 @@ for arg in "$@"; do
 done
 
 if [ "${#base_args[@]}" -lt 1 ] || [ "${#target_args[@]}" -lt 1 ]; then
-  echo "usage: build-with-cache.sh <base-installable> [nix build args...] -- <target-installable> [nix build args...]" >&2
+  echo "usage: $self <base-installable> [nix build args...] -- <target-installable> [nix build args...]" >&2
   exit 1
 fi
 

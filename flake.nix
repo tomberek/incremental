@@ -66,6 +66,15 @@
             exit "$status"
           ''}";
         };
+        # Same script as scripts/build-with-cache.sh, runnable without a checkout.
+        build-with-cache = {
+          type = "app";
+          program = "${pkgs.writeShellApplication {
+            name = "build-with-cache";
+            runtimeInputs = [ pkgs.nix ];
+            text = builtins.readFile ./scripts/build-with-cache.sh;
+          }}/bin/build-with-cache";
+        };
       }) inputs.nixpkgs.legacyPackages;
       packages = builtins.mapAttrs (
         system: pkgs:

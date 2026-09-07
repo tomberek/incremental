@@ -242,6 +242,15 @@ exact inputs base was actually built with — not a `follows`, which
 would be wrong here: base and target are supposed to use different
 `nix` revisions, and a `follows` would silently force them to match.
 
+Also runnable without a checkout, as `apps.<system>.build-with-cache`:
+
+```
+nix run github:tomberek/incremental#build-with-cache -- \
+  ".#nix-incremental" --override-input nix github:NixOS/nix/master \
+  -- \
+  ".#nix-incremental" --override-input nix github:NixOS/nix/pull/16428/merge
+```
+
 Three adjustments from NixOS/nix's own defaults:
 
 - `withUnityBuild = false` — Meson's unity-build feature merges many
