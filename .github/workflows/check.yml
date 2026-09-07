@@ -13,3 +13,4 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - run: nix flake check -L
       - run: nix build .#c .#hello-ccache .#golang .#zig .#rust -L
+      - run: bash scripts/verify-override-input.sh

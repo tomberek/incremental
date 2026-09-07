@@ -298,6 +298,18 @@ own `.incremental` output (`withCache` accepts either a rev-pinned
 flake ref or an already-fetched flake), so none of them needs
 git/network access, and all stay hermetic under the build sandbox.
 
+`scripts/verify-override-input.sh` checks a different layer: the
+literal `--override-input cache "git+file://$PWD?ref=HEAD"` CLI
+workflow documented above, for real, for every example. For each of
+`c`/`golang`/`zig`/`rust` it builds cold, edits the source with a
+unique marker, rebuilds via `--override-input`, and asserts the
+marker actually shows up when running the binary (reverting the edit
+either way). `hello-ccache` has no source to edit, so it instead
+forces a real rebuild with `--rebuild` (its derivation is otherwise
+byte-identical run to run, so Nix would just substitute) and asserts
+a nonzero ccache hit count. CI runs both this and `nix flake check`
+on every push.
+
 ## Chained rebuilds don't produce their own `incremental` output
 
 A plain build always produces an `incremental` output — what a later
