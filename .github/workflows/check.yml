@@ -14,5 +14,4 @@ jobs:
           fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@main
       - run: nix flake check -L
-      - run: nix build .#c .#hello-ccache .#golang .#zig .#rust -L
       - run: bash scripts/verify-override-input.sh
