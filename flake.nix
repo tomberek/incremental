@@ -5,451 +5,26 @@
 
   inputs.nix.url = "github:NixOS/nix";
 
-  outputs = inputs:
+  outputs =
+    inputs:
     let
       lib = inputs.nixpkgs.lib;
 
-      # Accepts a rev-pinned flake ref (fetched here) or an already-fetched
-      # flake attrset (e.g. from `checks`, where there's no ref to fetch).
-      resolveCache = cacheFlake: if builtins.isString cacheFlake then builtins.getFlake cacheFlake else cacheFlake;
-
-      # Restores a build's `incremental` output (from `cache`) and exports
-      # cacheVars pointing at it. `outputs` always includes "incremental" —
-      # a varying outputs list changes the derivation hash, breaking
-      # dependents' -I/-isystem-keyed caching. keepIncremental defaults off
-      # once already restoring from `cache`, to skip a redundant cache blob.
-      mkIncremental =
-        {
-          name, # key into cache.packages.${system}
-          system,
-          cacheVars, # env vars to point at the restored cache dir
-          cache ? inputs.cache, # an already-fetched flake to restore from
-          nuke ? true, # nuke-refs a fresh (uncached) dir
-          keepIncremental ? !(cache ? packages),
-        }:
-        let
-          prevIncremental = cache.packages.${system}.${name}.incremental or "empty";
-          isCached = cache ? packages;
-          dir = if keepIncremental then "$incremental" else "$NIX_BUILD_TOP/incremental-scratch";
-          debugDir = "$incremental/debug-logs"; # per-file hit/miss logs, always kept
-        in
-        {
-          inherit
-            isCached
-            keepIncremental
-            dir
-            debugDir
-            ;
-          outputs = [ "incremental" ];
-          restore =
-            lib.optionalString (!keepIncremental) "mkdir -p $incremental\n"
-            + ''
-              mkdir -p empty
-              cp -r ${prevIncremental} ${dir}
-              chmod -R +w ${dir}
-              mkdir -p ${debugDir}
-            ''
-            + lib.concatMapStrings (v: "export ${v}=${dir}\n") cacheVars;
-          # Runs even when restoring from a real cache: the build still
-          # writes new cache entries during this build on top of the
-          # restored ones, and those were never nuked.
-          nukeScript = if keepIncremental && nuke then "nuke-refs ${dir}/*/*\n" else "";
-        };
-
-      # `phase` is whichever hook runs before the tool reads its cache dir.
-      # Required: e.g. buildGoModule's own configurePhase sets $GOCACHE and
-      # only then runs postConfigure, so golang needs that specific hook.
-      mkIncrementalPackage =
-        {
-          name,
-          system,
-          cacheVars,
-          drv,
-          phase,
-          pkgs, # nuke-refs comes from here
-          cache ? inputs.cache,
-          nuke ? true,
-          keepIncremental ? !(cache ? packages),
-          extraPostInstall ? (_: ""),
-        }:
-        let
-          inc = mkIncremental { inherit name system cacheVars cache nuke keepIncremental; };
-        in
-        drv.overrideAttrs (
-          old:
-          {
-            outputs = (old.outputs or [ "out" ]) ++ inc.outputs;
-            ${phase} = (old.${phase} or "") + inc.restore;
-            # nuke-refs isn't on stdenv's PATH by default — added here so
-            # callers can't forget it and hit "command not found" the one
-            # time `nuke` actually fires (e.g. once keepIncremental flips).
-            nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ lib.optional nuke pkgs.nukeReferences;
-            # Restores from a build of a third party's own without touching
-            # their flake inputs: `pkg.withCache "git+file://...?rev=<sha>"`.
-            # keepIncremental is carried over explicitly, not re-defaulted —
-            # it must stay fixed regardless of which cache is passed in, same
-            # reason `outputs` must stay structurally constant (see above).
-            passthru = (old.passthru or { }) // {
-              withCache =
-                cacheFlake:
-                mkIncrementalPackage {
-                  inherit
-                    name
-                    system
-                    cacheVars
-                    drv
-                    phase
-                    pkgs
-                    nuke
-                    extraPostInstall
-                    ;
-                  keepIncremental = inc.keepIncremental;
-                  cache = resolveCache cacheFlake;
-                };
-            };
-          }
-          // lib.optionalAttrs (nuke || (extraPostInstall inc.isCached) != "") {
-            postInstall = (old.postInstall or "") + inc.nukeScript + extraPostInstall inc.isCached;
-          }
-        );
-
-      # Adds autoconf's --cache-file so AC_CHECK_*/AC_TRY_* results survive
-      # rebuilds. Never touches config.status/Makefile/config.h — those
-      # bake $out into text (or the compiled binary), unsafe to restore
-      # across a source patch. See README, "What's safe to cache".
-      mkIncrementalAutotoolsPackage =
-        {
-          name,
-          system,
-          drv,
-          pkgs,
-          cache ? inputs.cache,
-          cacheVars ? [ ],
-          nuke ? cacheVars == [ ],
-          extraPostInstall ? (_: ""),
-        }:
-        mkIncrementalPackage {
-          inherit name system cache cacheVars nuke extraPostInstall pkgs;
-          keepIncremental = true; # --cache-file needs a real declared output
-          phase = "postPatch";
-          drv = drv.overrideAttrs (old: {
-            configureFlags = (old.configureFlags or [ ]) ++ [
-              "--cache-file=${placeholder "incremental"}/config.cache"
-            ];
-          });
-        };
-
-      # Go and Zig both just need mkIncrementalPackage with a fixed
-      # cacheVars/phase — shared shape for the two definitions below.
-      mkEcosystemPackage =
-        { cacheVars, phase }:
-        {
-          name,
-          system,
-          pkgs,
-          drv,
-          cache ? inputs.cache,
-          nuke ? true,
-          keepIncremental ? !(cache ? packages),
-          extraPostInstall ? (_: ""),
-        }:
-        mkIncrementalPackage {
-          inherit
-            name
-            system
-            pkgs
-            drv
-            cache
-            nuke
-            keepIncremental
-            extraPostInstall
-            cacheVars
-            phase
-            ;
-        };
-
-      # buildGoModule's own configurePhase sets $GOCACHE and only then
-      # runs postConfigure — mkIncrementalPackage's `phase` argument must
-      # be exactly that hook, so bake it in rather than making every
-      # caller rediscover it.
-      mkIncrementalGoPackage = mkEcosystemPackage {
-        cacheVars = [ "GOCACHE" ];
-        phase = "postConfigure";
-      };
-
-      # zig.hook's zigConfigurePhase only ever reassigns
-      # ZIG_GLOBAL_CACHE_DIR, never ZIG_LOCAL_CACHE_DIR — so both must be
-      # exported before configurePhase runs, i.e. in preConfigure.
-      mkIncrementalZigPackage = mkEcosystemPackage {
-        cacheVars = [
-          "ZIG_LOCAL_CACHE_DIR"
-          "ZIG_GLOBAL_CACHE_DIR"
-        ];
-        phase = "preConfigure";
-      };
-
-      # buildRustPackage's cargoInstallHook looks for a fixed *relative*
-      # path (`target/<subdir>/<buildType>`), not $CARGO_TARGET_DIR — so
-      # unlike Go/Zig, the restored dir has to be symlinked to `./target`
-      # rather than exported as an env var. cargoBuildHook's `runHook
-      # preBuild` (right before `cargo build`) is still the right point
-      # to do that, before anything reads the target dir.
-      mkIncrementalRustPackage =
-        {
-          name,
-          system,
-          pkgs,
-          drv,
-          cache ? inputs.cache,
-          nuke ? true,
-          keepIncremental ? !(cache ? packages),
-          extraPostInstall ? (_: ""),
-        }:
-        let
-          inc = mkIncremental {
-            inherit
-              name
-              system
-              cache
-              nuke
-              keepIncremental
-              ;
-            cacheVars = [ ];
-          };
-        in
-        (mkIncrementalPackage {
-          inherit
-            name
-            system
-            pkgs
-            drv
-            cache
-            nuke
-            keepIncremental
-            extraPostInstall
-            ;
-          cacheVars = [ ];
-          phase = "preBuild";
-        }).overrideAttrs
-          (old: {
-            preBuild = old.preBuild + "ln -sfn ${inc.dir} target\n";
-            passthru = old.passthru // {
-              withCache =
-                cacheFlake:
-                mkIncrementalRustPackage {
-                  inherit
-                    name
-                    system
-                    pkgs
-                    drv
-                    nuke
-                    extraPostInstall
-                    ;
-                  keepIncremental = inc.keepIncremental;
-                  cache = resolveCache cacheFlake;
-                };
-            };
-          });
-
-      # Shared ccache env/report shell.
-      ccacheEnv =
-        { pkgs, pname, dir, debugDir }:
-        {
-          setup = ''
-            export CCACHE_SLOPPINESS=random_seed,include_file_mtime,include_file_ctime
-            export CCACHE_COMPRESS=1
-            export CCACHE_UMASK=007
-            export CCACHE_NOINODECACHE=1
-            export CCACHE_DEBUG=1
-            export CCACHE_DEBUGDIR="${debugDir}"
-            ${pkgs.ccache}/bin/ccache --dir "${dir}" --zero-stats > /dev/null
-          '';
-          report = ''
-            ${pkgs.ccache}/bin/ccache --dir "${dir}" --show-stats
-            hits=$(${pkgs.ccache}/bin/ccache --dir "${dir}" --print-stats | awk '$1=="direct_cache_hit"||$1=="preprocessed_cache_hit"{s+=$2}END{print s+0}')
-            misses=$(${pkgs.ccache}/bin/ccache --dir "${dir}" --print-stats | awk '$1=="cache_miss"{print $2+0}')
-            total=$((hits + misses))
-            pct=0
-            if [ "$total" -gt 0 ]; then pct=$((hits * 100 / total)); fi
-            echo "ccache[${pname}]: $hits/$total hits ($pct%)"
-            echo "$pct" > "${dir}/ccache-hit-pct" # read by `checks` — see below
-            if [ "$misses" -gt 0 ] && [ -d "${debugDir}" ]; then
-              echo "ccache[${pname}]: miss reasons (top):"
-              find "${debugDir}" -name '*.ccache-log' -exec grep -m1 "Result:" {} + 2>/dev/null \
-                | sed -E 's/^.*Result: //' | sort | uniq -c | sort -rn | head -5 \
-                | sed "s/^/ccache[${pname}]:   /" || true
-            fi
-          '';
-        };
-
-      # `drv` must already be built with ccacheStdenv (a plain
-      # stdenv.mkDerivation has no .override for swapping it in after the
-      # fact); the assert catches a missing ccacheStdenv at eval time
-      # instead of a sandbox "Permission denied" during the build.
-      mkIncrementalCcachePackage =
-        {
-          name,
-          system,
-          pkgs,
-          drv,
-          phase,
-          cache ? inputs.cache,
-          nuke ? false, # ccache manages its own dir
-          keepIncremental ? !(cache ? packages),
-        }:
-        assert lib.assertMsg (drv.stdenv.cc.pname or "" == "ccache-links-wrapper")
-          "mkIncrementalCcachePackage: `drv` (${name}) wasn't built with pkgs.ccacheStdenv.";
-        let
-          inc = mkIncremental {
-            inherit
-              name
-              system
-              cache
-              nuke
-              keepIncremental
-              ;
-            cacheVars = [ "CCACHE_DIR" ];
-          };
-          env = ccacheEnv {
-            inherit pkgs;
-            pname = name;
-            dir = inc.dir;
-            debugDir = inc.debugDir;
-          };
-        in
-        (mkIncrementalPackage {
-          inherit
-            name
-            system
-            drv
-            phase
-            pkgs
-            cache
-            nuke
-            keepIncremental
-            ;
-          cacheVars = [ "CCACHE_DIR" ];
-          extraPostInstall = _isCached: env.report;
-        }).overrideAttrs
-          (old: {
-            # env.setup needs CCACHE_DIR live, which inc.restore just set
-            # in ${phase} — so it has to run after, in one more layer.
-            ${phase} = old.${phase} + env.setup;
-            # Overrides the inherited passthru.withCache from
-            # mkIncrementalPackage — that one skips env.setup, which
-            # would silently drop CCACHE_SLOPPINESS/debug-logging/report.
-            passthru = old.passthru // {
-              withCache =
-                cacheFlake:
-                mkIncrementalCcachePackage {
-                  inherit
-                    name
-                    system
-                    pkgs
-                    drv
-                    phase
-                    nuke
-                    ;
-                  keepIncremental = inc.keepIncremental;
-                  cache = resolveCache cacheFlake;
-                };
-            };
-          });
-
-      # NixOS/nix's flake splits `nix` into ~14 Meson/Ninja components
-      # sharing a scope via overrideAllMesonComponents — an overlay
-      # applied to every component, so building nix-cli applies it
-      # underneath too. withUnityBuild = false: unity builds merge many
-      # .cc files into one translation unit, wrecking ccache's per-file
-      # hit rate. withAWS = false on nix-store: aws-crt-cpp resolves via
-      # CMake, whose compiler-detection breaks under a swapped
-      # ccacheStdenv.
-      #
-      # Only `target` gets a cache-varying restore script; every
-      # dependency gets a fixed one. `cache` is a nested evaluation of
-      # this same flake with its own `cache` input — if a dependency's
-      # script varied with caching state, it would build a different
-      # derivation (different `dev` output path) in `cache`'s tree vs.
-      # the target's tree, and dependents embed that path in every
-      # -I/-isystem flag, turning every file into a miss regardless of
-      # actual source changes. Tradeoff: only the component you're
-      # building gets cross-build ccache hits; dependencies fall back
-      # to plain store substitution.
-      mkIncrementalNixComponents =
-        { system, target }:
-        let
-          pkgs = inputs.nix.inputs.nixpkgs.legacyPackages.${system};
-          scope = (inputs.nix.lib.makeComponents {
-            inherit pkgs;
-            getStdenv = p: p.ccacheStdenv;
-          }).overrideScope
-            (finalScope: prevScope: {
-              withUnityBuild = false;
-              nix-store = prevScope.nix-store.override { withAWS = false; };
-            });
-
-          # random_seed: stdenv's cc-wrapper adds a fresh -frandom-seed
-          # every invocation, a guaranteed miss otherwise.
-          # include_file_mtime/ctime: every dependency header is
-          # materialized fresh each build, which ccache's own "recently
-          # modified" safety check would otherwise reject.
-          ccacheTuning = ''
-            export CCACHE_SLOPPINESS=random_seed,include_file_mtime,include_file_ctime
-            export CCACHE_COMPRESS=1
-            export CCACHE_UMASK=007
-          '';
-        in
-        scope.overrideAllMesonComponents (
-          finalAttrs: prevAttrs:
-          if prevAttrs.pname == target then
-            let
-              inc = mkIncremental {
-                name = prevAttrs.pname;
-                inherit system;
-                cacheVars = [ "CCACHE_DIR" ];
-                nuke = false;
-                keepIncremental = true;
-              };
-              env = ccacheEnv {
-                inherit pkgs;
-                pname = prevAttrs.pname;
-                dir = inc.dir;
-                debugDir = inc.debugDir;
-              };
-            in
-            {
-              outputs = (prevAttrs.outputs or [ "out" ]) ++ inc.outputs;
-              # Meson resolves CMake deps (e.g. nix-expr's toml11) during
-              # configurePhase, so CCACHE_DIR must be live before that.
-              preConfigure = (prevAttrs.preConfigure or "") + inc.restore + env.setup;
-              postInstall = (prevAttrs.postInstall or "") + env.report;
-            }
-          else
-            {
-              preConfigure =
-                (prevAttrs.preConfigure or "")
-                + ''
-                  mkdir -p "$NIX_BUILD_TOP/ccache-scratch"
-                  export CCACHE_DIR="$NIX_BUILD_TOP/ccache-scratch"
-                ''
-                + ccacheTuning;
-            }
-        );
+      incrementalLib = import ./lib { inherit inputs; };
+      inherit (incrementalLib)
+        mkIncremental
+        mkIncrementalPackage
+        mkIncrementalAutotoolsPackage
+        mkIncrementalGoPackage
+        mkIncrementalZigPackage
+        mkIncrementalRustPackage
+        ccacheEnv
+        mkIncrementalCcachePackage
+        mkIncrementalNixComponents
+        ;
     in
     {
-      lib = {
-        inherit
-          mkIncremental
-          mkIncrementalPackage
-          mkIncrementalAutotoolsPackage
-          mkIncrementalGoPackage
-          mkIncrementalZigPackage
-          mkIncrementalRustPackage
-          ccacheEnv
-          mkIncrementalCcachePackage
-          mkIncrementalNixComponents
-          ;
-      };
+      lib = incrementalLib;
       formatter = builtins.mapAttrs (system: pkgs: pkgs.nixfmt-tree) inputs.nixpkgs.legacyPackages;
       devShells = builtins.mapAttrs (system: pkgs: rec {
         default = pkgs.mkShell {
@@ -547,7 +122,9 @@
                     # Overrides the inherited passthru.withCache from
                     # mkIncrementalPackage, which would skip env.setup above.
                     passthru = old.passthru // {
-                      withCache = cacheFlake: mkHelloCcache (resolveCache cacheFlake);
+                      withCache =
+                        cacheFlake:
+                        mkHelloCcache (if builtins.isString cacheFlake then builtins.getFlake cacheFlake else cacheFlake);
                     };
                   });
             in
@@ -605,7 +182,9 @@
             drv = pkgs.rustPlatform.buildRustPackage {
               name = "rust";
               src = pkgs.lib.cleanSource ./rust;
-              cargoLock = { lockFile = ./rust/Cargo.lock; };
+              cargoLock = {
+                lockFile = ./rust/Cargo.lock;
+              };
               # Nix normalizes unpacked source mtimes to the epoch, so
               # Cargo's mtime-based fingerprinting sees "unchanged" every
               # rebuild and serves a stale binary. checksum-freshness
@@ -616,10 +195,11 @@
             };
           };
 
-          nix-incremental = (mkIncrementalNixComponents {
-            inherit system;
-            target = "nix-cli";
-          }).nix-cli;
+          nix-incremental =
+            (mkIncrementalNixComponents {
+              inherit system;
+              target = "nix-cli";
+            }).nix-cli;
         }
         // lib.genAttrs nixComponentNames (
           target: (mkIncrementalNixComponents { inherit system target; }).${target}
@@ -658,14 +238,19 @@
           # second source — see the `rust` package above for why this can
           # go wrong without checksum-freshness.
           mkRustStalenessTest =
-            { src, cache ? inputs.cache }:
+            {
+              src,
+              cache ? inputs.cache,
+            }:
             mkIncrementalRustPackage {
               name = "rust-staleness-self-test";
               inherit system pkgs cache;
               drv = pkgs.rustPlatform.buildRustPackage {
                 name = "rust-staleness-self-test";
                 inherit src;
-                cargoLock = { lockFile = "${src}/Cargo.lock"; };
+                cargoLock = {
+                  lockFile = "${src}/Cargo.lock";
+                };
                 env.RUSTC_BOOTSTRAP = "1";
                 cargoBuildFlags = [ "-Zchecksum-freshness" ];
                 doCheck = false;
@@ -686,35 +271,30 @@
             (mkRustStalenessTest {
               src = rustSrc "warm";
               cache = {
-                packages.${system}."rust-staleness-self-test".incremental =
-                  coldRustStalenessTest.incremental;
+                packages.${system}."rust-staleness-self-test".incremental = coldRustStalenessTest.incremental;
               };
             }).overrideAttrs
               (old: {
-                postInstall =
-                  old.postInstall
-                  + ''
-                    out=$($out/bin/rust-example)
-                    echo "self-test[rust]: binary printed: $out"
-                    if [ "$out" != "warm" ]; then
-                      echo "self-test[rust]: FAILED — expected \"warm\", got a stale binary printing \"$out\"" >&2
-                      exit 1
-                    fi
-                  '';
+                postInstall = old.postInstall + ''
+                  out=$($out/bin/rust-example)
+                  echo "self-test[rust]: binary printed: $out"
+                  if [ "$out" != "warm" ]; then
+                    echo "self-test[rust]: FAILED — expected \"warm\", got a stale binary printing \"$out\"" >&2
+                    exit 1
+                  fi
+                '';
               });
           c-self-test =
             (coldC.withCache { packages.${system}.c.incremental = coldC.incremental; }).overrideAttrs
               (old: {
-                postInstall =
-                  old.postInstall
-                  + ''
-                    pct=$(cat $incremental/ccache-hit-pct)
-                    echo "self-test[c]: $pct% ccache hits restoring an unchanged build"
-                    if [ "$pct" -lt 90 ]; then
-                      echo "self-test[c]: FAILED — expected near-total hits" >&2
-                      exit 1
-                    fi
-                  '';
+                postInstall = old.postInstall + ''
+                  pct=$(cat $incremental/ccache-hit-pct)
+                  echo "self-test[c]: $pct% ccache hits restoring an unchanged build"
+                  if [ "$pct" -lt 90 ]; then
+                    echo "self-test[c]: FAILED — expected near-total hits" >&2
+                    exit 1
+                  fi
+                '';
               });
           nuke-refs-self-test = coldNukeTest.withCache {
             packages.${system}."nuke-refs-self-test".incremental = coldNukeTest.incremental;

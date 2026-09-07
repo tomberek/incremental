@@ -1,0 +1,43 @@
+{ inputs, lib }:
+
+# Restores a build's `incremental` output (from `cache`) and exports
+# cacheVars pointing at it. `outputs` always includes "incremental" —
+# a varying outputs list changes the derivation hash, breaking
+# dependents' -I/-isystem-keyed caching. keepIncremental defaults off
+# once already restoring from `cache`, to skip a redundant cache blob.
+{
+  name, # key into cache.packages.${system}
+  system,
+  cacheVars, # env vars to point at the restored cache dir
+  cache ? inputs.cache, # an already-fetched flake to restore from
+  nuke ? true, # nuke-refs a fresh (uncached) dir
+  keepIncremental ? !(cache ? packages),
+}:
+let
+  prevIncremental = cache.packages.${system}.${name}.incremental or "empty";
+  isCached = cache ? packages;
+  dir = if keepIncremental then "$incremental" else "$NIX_BUILD_TOP/incremental-scratch";
+  debugDir = "$incremental/debug-logs"; # per-file hit/miss logs, always kept
+in
+{
+  inherit
+    isCached
+    keepIncremental
+    dir
+    debugDir
+    ;
+  outputs = [ "incremental" ];
+  restore =
+    lib.optionalString (!keepIncremental) "mkdir -p $incremental\n"
+    + ''
+      mkdir -p empty
+      cp -r ${prevIncremental} ${dir}
+      chmod -R +w ${dir}
+      mkdir -p ${debugDir}
+    ''
+    + lib.concatMapStrings (v: "export ${v}=${dir}\n") cacheVars;
+  # Runs even when restoring from a real cache: the build still
+  # writes new cache entries during this build on top of the
+  # restored ones, and those were never nuked.
+  nukeScript = if keepIncremental && nuke then "nuke-refs ${dir}/*/*\n" else "";
+}
