@@ -242,10 +242,15 @@ Three adjustments from NixOS/nix's own defaults:
 
 Each package points a tool's own cache dir (or file) at the restored
 `incremental` output and lets the tool decide what to reuse. Safe
-because these caches are content-addressed: ccache keys on
-preprocessed source + flags, Go/Zig's build caches similarly, and
-autoconf's `config.cache` stores check results ("does `malloc` exist?
-yes") with no path baked in.
+when these caches are content-addressed: ccache keys on preprocessed
+source + flags, Go/Zig's build caches similarly, and autoconf's
+`config.cache` stores check results ("does `malloc` exist? yes")
+with no path baked in.
+
+Not every tool defaults to this. Cargo's own build cache is
+mtime-based, not content-addressed, and needs `-Zchecksum-freshness`
+turned on explicitly before it's safe to restore this way — see
+"Rust" above and `rust-staleness-self-test` in "Checks" below.
 
 Caching `./configure`'s actual *output* — `config.status`, the
 generated `Makefile`, `config.h` — isn't safe and isn't done here.
