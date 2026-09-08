@@ -37,6 +37,7 @@ in
     system
     pkgs
     mkIncrementalAutotoolsPackage
+    mkIncrementalCcachePackage
     ccacheEnv
     ;
 }

@@ -3,9 +3,10 @@
   system,
   pkgs,
   mkIncrementalAutotoolsPackage,
+  mkIncrementalCcachePackage,
   ccacheEnv,
 }:
-# A bigger real-world C package from nixpkgs, to check whether this
+# Bigger real-world C packages from nixpkgs, to check whether this
 # caching approach is viable for speeding up iteration on something
 # larger than this repo's own toy examples. Same pattern as
 # hello-ccache.nix, just wrapping a real nixpkgs derivation instead of
@@ -27,6 +28,7 @@
 # (`error: invalid option "--cache-file=..."`), so it's incompatible
 # with mkIncrementalAutotoolsPackage outright.
 let
+  # jq-style: autoconf-based, gets --cache-file too.
   mkNixpkgsExample =
     name: drv:
     let
@@ -70,7 +72,20 @@ let
           });
     in
     mkForCache inputs.cache;
+
+  # redis-style: no ./configure at all (plain Makefile) — --cache-file
+  # would be silently useless, so ccache-only via
+  # mkIncrementalCcachePackage instead of mkIncrementalAutotoolsPackage.
+  mkNixpkgsCcacheOnlyExample =
+    name: drv:
+    mkIncrementalCcachePackage {
+      inherit name system pkgs;
+      phase = "postPatch"; # always runs, even with no configurePhase
+      nuke = true; # see mkNixpkgsExample above for why
+      drv = drv.override { stdenv = pkgs.ccacheStdenv; };
+    };
 in
 {
   nixpkgs-jq = mkNixpkgsExample "nixpkgs-jq" pkgs.jq;
+  nixpkgs-redis = mkNixpkgsCcacheOnlyExample "nixpkgs-redis" pkgs.redis;
 }

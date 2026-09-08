@@ -70,18 +70,33 @@ verify_edit rust rust/src/main.rs \
 # derivation first, and disabling remote builders for this one build — a
 # configured remote builder can still have (and hand back) the same
 # output even after it's deleted locally.
-nix build .#hello-ccache -o result-hello-ccache-cold
-warm_drv=$(nix path-info --derivation --override-input cache "git+file://$PWD?ref=HEAD" .#hello-ccache)
-nix store delete "$warm_drv" $(nix-store -q --outputs "$warm_drv" 2>/dev/null) 2>/dev/null || true
-log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#hello-ccache -o result-hello-ccache-warm --builders "" 2>&1)
-hits=$(echo "$log" | grep -oP 'ccache\[hello-ccache\]: \K[0-9]+(?=/[0-9]+ hits)' || echo 0)
-if [ "${hits:-0}" -gt 0 ]; then
-  echo "override-input-verify[hello-ccache]: OK ($hits ccache hits)"
-else
-  echo "override-input-verify[hello-ccache]: FAILED — expected a nonzero ccache hit count, got:" >&2
-  echo "$log" >&2
-  failures=$((failures + 1))
-fi
+verify_ccache_hits() {
+  local name="$1"
+  nix build ".#$name" -o "result-$name-cold"
+  local warm_drv
+  warm_drv=$(nix path-info --derivation --override-input cache "git+file://$PWD?ref=HEAD" ".#$name")
+  nix store delete "$warm_drv" $(nix-store -q --outputs "$warm_drv" 2>/dev/null) 2>/dev/null || true
+  local log
+  log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L ".#$name" -o "result-$name-warm" --builders "" 2>&1)
+  local hits
+  hits=$(echo "$log" | grep -oP "ccache\[$name\]: \K[0-9]+(?=/[0-9]+ hits)" || echo 0)
+  if [ "${hits:-0}" -gt 0 ]; then
+    echo "override-input-verify[$name]: OK ($hits ccache hits)"
+  else
+    echo "override-input-verify[$name]: FAILED — expected a nonzero ccache hit count, got:" >&2
+    echo "$log" >&2
+    failures=$((failures + 1))
+  fi
+}
+
+verify_ccache_hits hello-ccache
+
+# nixpkgs-jq/nixpkgs-redis check the same mechanism (a shallow vs.
+# recursive nuke-refs bug regressed exactly this — see git history)
+# against real, sizable nixpkgs packages instead of this repo's own
+# toy examples.
+verify_ccache_hits nixpkgs-jq
+verify_ccache_hits nixpkgs-redis
 
 if [ "$failures" -gt 0 ]; then
   echo "override-input-verify: $failures check(s) failed" >&2
