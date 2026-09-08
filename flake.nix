@@ -75,6 +75,15 @@
             text = builtins.readFile ./scripts/build-with-cache.sh;
           }}/bin/build-with-cache";
         };
+        # Same script as scripts/build-input-diff.sh, runnable without a checkout.
+        build-input-diff = {
+          type = "app";
+          program = "${pkgs.writeShellApplication {
+            name = "build-input-diff";
+            runtimeInputs = [ pkgs.nix ];
+            text = builtins.readFile ./scripts/build-input-diff.sh;
+          }}/bin/build-input-diff";
+        };
       }) inputs.nixpkgs.legacyPackages;
       packages = builtins.mapAttrs (
         system: pkgs:

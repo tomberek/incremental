@@ -263,6 +263,16 @@ nix run github:tomberek/incremental#build-with-cache -- \
   ".#nix-incremental" --override-input nix github:NixOS/nix/pull/16428/merge
 ```
 
+For the common case of comparing two revs of *one* input (this is
+that same pairing, just for a single named input instead of
+mirroring an arbitrary list of overrides), `build-input-diff.sh` /
+`apps.<system>.build-input-diff` is shorter:
+
+```
+nix run github:tomberek/incremental#build-input-diff -- \
+  .#nix-incremental nix github:NixOS/nix/master github:NixOS/nix/pull/16428/merge
+```
+
 Three adjustments from NixOS/nix's own defaults:
 
 - `withUnityBuild = false` — Meson's unity-build feature merges many
