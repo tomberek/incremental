@@ -270,8 +270,17 @@ mirroring an arbitrary list of overrides), `build-input-diff.sh` /
 
 ```
 nix run github:tomberek/incremental#build-input-diff -- \
-  .#nix-incremental nix github:NixOS/nix/master github:NixOS/nix/pull/16428/merge
+  .#nix-all-components nix github:NixOS/nix/master github:NixOS/nix/pull/16428/merge
 ```
+
+Measured on `nix-util`/`nix-store` (cold vs. a same-source rebuild
+restoring 100%-hit ccache state): 44s → 17s and 101s → 36s
+respectively — roughly a 2.6-2.8x speedup. A real PR pays full price
+for whatever it actually touches; everything else gets this speedup.
+Components that `#include` a changed component's headers (e.g.
+`nix-expr` including `nix-fetchers`) recompile too, since their
+`-isystem` flag now points at a different (also-changed) `-dev`
+store path — a real cost, not a cache misconfiguration.
 
 Three adjustments from NixOS/nix's own defaults:
 
