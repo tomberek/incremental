@@ -6,10 +6,12 @@
 # build-input-diff.sh), baseline and target can be entirely different
 # flakes.
 #
-# usage: with-cache.sh <baseline-flake-ref> <target-flake-ref>#<name-or-attrpath> [nix build args...]
+# usage: with-cache.sh <baseline-flake-ref> [target-flake-ref#name-or-attrpath] [nix build args...]
+#
+# target defaults to ".#default", matching `nix build`'s own default.
 #
 # Example: seed from a previous local build, then build after an edit —
-#   with-cache.sh . ".#default"
+#   with-cache.sh .
 #
 # <name-or-attrpath> with no dots expands to packages.<system>.<name>,
 # matching `nix build`'s own shorthand; a dotted path (e.g.
@@ -21,21 +23,21 @@
 set -euo pipefail
 
 self="$(basename "$0")"
-if [ "$#" -lt 2 ]; then
-  echo "usage: $self <baseline-flake-ref> <target-flake-ref>#<name-or-attrpath> [nix build args...]" >&2
+if [ "$#" -lt 1 ]; then
+  echo "usage: $self <baseline-flake-ref> [target-flake-ref#name-or-attrpath] [nix build args...]" >&2
   exit 1
 fi
 
 baseline="$1"
-target="$2"
-shift 2
+shift
+target=".#default"
+if [ "$#" -gt 0 ] && [[ "$1" == *#* ]]; then
+  target="$1"
+  shift
+fi
 
 flake_ref="${target%%#*}"
 attr_path_str="${target#*#}"
-if [ "$flake_ref" = "$target" ]; then
-  echo "error: target must be <flake-ref>#<name-or-attrpath>" >&2
-  exit 1
-fi
 
 case "$attr_path_str" in
 *.*) ;; # already a full attrpath, e.g. checks.x86_64-linux.foo

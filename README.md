@@ -40,20 +40,25 @@ returns the same package restoring from that build instead — no
 ```
 $ nix build .#default   # also produces .#default.incremental
 echo "// x" >> main.go
-$ nix run github:tomberek/incremental#with-cache -- \
-    "git+file://$PWD?rev=<pre-edit-commit>" \
-    "git+file://$PWD?rev=HEAD#default"
+$ nix run github:tomberek/incremental#with-cache -- .
 ```
 
 `with-cache` takes the baseline first, then the target being built —
-"use this cache, build this". It auto-pins the baseline to its locked
-rev via `nix flake metadata` if it isn't already, so a plain local
-path or branch name works too, not just an explicit `?rev=<sha>`:
+"use this baseline, build this". Target defaults to `.#default`,
+matching `nix build`'s own default; give it explicitly for anything
+else:
 
 ```
-$ nix build .#default
-echo "// x" >> main.go
 $ nix run github:tomberek/incremental#with-cache -- . ".#default"
+```
+
+Baseline is auto-pinned to its locked rev via `nix flake metadata` if
+it isn't already, so a plain local path or branch name works too, not
+just an explicit `?rev=<sha>`:
+
+```
+$ nix run github:tomberek/incremental#with-cache -- \
+    "git+file://$PWD?rev=<pre-edit-commit>" ".#default"
 ```
 
 The target, by contrast, is built with `--impure` and can stay
