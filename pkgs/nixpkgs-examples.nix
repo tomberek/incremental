@@ -14,6 +14,12 @@
 #
 # jq works well: ~2x wall-clock speedup restoring a warm cache
 # (measured 51s -> 23s), 95% real ccache hit rate on a no-op rebuild.
+# redis (mkIncrementalCcachePackage, below — no ./configure) does
+# even better: 4m46s -> 42s, 96% real hits. tmux hits 100% but only
+# gets ~1.6x (2m -> 1m13s): most of its wall-clock is autoconf's own
+# `./configure` checks and a single-threaded final link, neither of
+# which ccache touches — a real example of "100% cache hits" not
+# implying "proportionally faster", not a bug.
 #
 # Tried and dropped as examples: curl hits 100% in ccache but shows
 # no real speedup — its build time is dominated by man-page
@@ -87,5 +93,6 @@ let
 in
 {
   nixpkgs-jq = mkNixpkgsExample "nixpkgs-jq" pkgs.jq;
+  nixpkgs-tmux = mkNixpkgsExample "nixpkgs-tmux" pkgs.tmux;
   nixpkgs-redis = mkNixpkgsCcacheOnlyExample "nixpkgs-redis" pkgs.redis;
 }

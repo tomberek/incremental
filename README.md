@@ -166,23 +166,31 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#hello-ccache
 `--cache-file`: `nix build -L` shows `configure: loading cache
 .../config.cache`, plus a ccache hit rate on rebuild.
 
-### Real nixpkgs packages (nixpkgs-jq, nixpkgs-redis)
+### Real nixpkgs packages (nixpkgs-jq, nixpkgs-redis, nixpkgs-tmux)
 
-The above are toy examples; these two check whether this is viable on
-something real. Both are: `nixpkgs-jq` wraps `pkgs.jq` (same
+The above are toy examples; these check whether this is viable on
+something real. `nixpkgs-jq` wraps `pkgs.jq` (same
 `mkIncrementalAutotoolsPackage` pattern, `pkgs.jq.override { stdenv =
 pkgs.ccacheStdenv; }`) — measured 38s cold → 22s restoring a
 same-source cache, 95% real ccache hit rate. `nixpkgs-redis` wraps
 `pkgs.redis`, which has no `./configure` at all (plain Makefile), so
 it's built with `mkIncrementalCcachePackage` directly instead
 (ccache-only, no `--cache-file` claim) — measured 4m46s cold → 42s,
-96% real ccache hit rate.
+96% real ccache hit rate. `nixpkgs-tmux` wraps `pkgs.tmux` — 100%
+real ccache hit rate, but only ~1.6x wall-clock (2m → 1m13s): most of
+tmux's build time is autoconf's own `./configure` checks plus a
+single-threaded final link, neither of which ccache touches. A useful
+reminder that "100% cache hits" doesn't automatically mean
+"proportionally faster" — it depends on how much of the wall-clock is
+actually compilation.
 
 ```
 $ nix build .#nixpkgs-jq
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-jq
 $ nix build .#nixpkgs-redis
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-redis
+$ nix build .#nixpkgs-tmux
+$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-tmux
 ```
 
 Not every C package benefits the same way — tried and dropped as
