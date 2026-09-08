@@ -166,17 +166,23 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#hello-ccache
 `--cache-file`: `nix build -L` shows `configure: loading cache
 .../config.cache`, plus a ccache hit rate on rebuild.
 
-### A real nixpkgs package (nixpkgs-jq)
+### Real nixpkgs packages (nixpkgs-jq, nixpkgs-redis)
 
-The above are toy examples; `nixpkgs-jq` wraps `pkgs.jq` itself (same
+The above are toy examples; these two check whether this is viable on
+something real. Both are: `nixpkgs-jq` wraps `pkgs.jq` (same
 `mkIncrementalAutotoolsPackage` pattern, `pkgs.jq.override { stdenv =
-pkgs.ccacheStdenv; }`) to check whether this is viable on something
-real. It is: measured 38s cold → 22s restoring a same-source cache,
-95% real ccache hit rate.
+pkgs.ccacheStdenv; }`) — measured 38s cold → 22s restoring a
+same-source cache, 95% real ccache hit rate. `nixpkgs-redis` wraps
+`pkgs.redis`, which has no `./configure` at all (plain Makefile), so
+it's built with `mkIncrementalCcachePackage` directly instead
+(ccache-only, no `--cache-file` claim) — measured 4m46s cold → 42s,
+96% real ccache hit rate.
 
 ```
 $ nix build .#nixpkgs-jq
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-jq
+$ nix build .#nixpkgs-redis
+$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-redis
 ```
 
 Not every C package benefits the same way — tried and dropped as
