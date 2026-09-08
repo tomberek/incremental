@@ -77,6 +77,23 @@ nix build --impure --expr \
    in pkg.withCache "<baseline-locked-flake-ref>"'
 ```
 
+Every `mkIncrementalPackage`-based derivation also carries
+`passthru.asCacheApp`: the same `withCache` call again, but with the
+baseline pre-filled to *this build's own already-fetched source*
+(`inputs.self`, pinned via its own content hash — works even from a
+dirty tree, no commit required). Useful when the baseline is a flake
+you're already inside, so there's no flake ref to type out at all:
+
+```
+nix run <this-flake>#default.passthru.asCacheApp -- <target-flake-ref>#<name-or-attrpath>
+```
+
+Note this has to be a plain derivation, not a `type = "app"` value —
+`nix run` only recognizes that shape under `apps.<system>.<name>`, not
+at an arbitrary attribute path. `writeShellApplication` (what builds
+it) sets `meta.mainProgram`, which is enough for `nix run` to find the
+right binary regardless.
+
 `mkIncrementalGoPackage`, `mkIncrementalZigPackage`, and
 `mkIncrementalRustPackage` bake in the right `cacheVars`/`phase` for
 those ecosystems (see "Examples in this repo" below for why each
