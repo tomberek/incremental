@@ -31,6 +31,15 @@ in
   zig = import ./zig.nix { inherit system pkgs mkIncrementalZigPackage; };
   rust = import ./rust.nix { inherit system pkgs mkIncrementalRustPackage; };
 }
+// import ./nixpkgs-examples.nix {
+  inherit
+    inputs
+    system
+    pkgs
+    mkIncrementalAutotoolsPackage
+    ccacheEnv
+    ;
+}
 // import ./nix-components.nix {
   inherit
     lib

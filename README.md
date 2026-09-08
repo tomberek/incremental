@@ -166,6 +166,36 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#hello-ccache
 `--cache-file`: `nix build -L` shows `configure: loading cache
 .../config.cache`, plus a ccache hit rate on rebuild.
 
+### A real nixpkgs package (nixpkgs-jq)
+
+The above are toy examples; `nixpkgs-jq` wraps `pkgs.jq` itself (same
+`mkIncrementalAutotoolsPackage` pattern, `pkgs.jq.override { stdenv =
+pkgs.ccacheStdenv; }`) to check whether this is viable on something
+real. It is: measured 38s cold → 22s restoring a same-source cache,
+95% real ccache hit rate.
+
+```
+$ nix build .#nixpkgs-jq
+$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-jq
+```
+
+Not every C package benefits the same way — tried and dropped as
+examples for instructive reasons:
+
+- `curl` hits 100% in ccache but shows no real wall-clock speedup —
+  its build time is dominated by man-page rendering/install steps,
+  not compilation, so there's nothing for ccache to save.
+- `openssh` bakes its own `$out` into compile-time `-D` flags
+  (`-D_PATH_SSH_PROGRAM=...` and similar `_PATH_*` macros). Since
+  `$out` is a different store path on every build with a different
+  `cache` input, every compile command differs between builds
+  regardless of source changes — ccache's key ends up unique per
+  build, and the real hit rate is 0%.
+- `nginx`'s `./configure` isn't autoconf-based and doesn't recognize
+  `--cache-file` at all (`error: invalid option
+  "--cache-file=..."`), so it's incompatible with
+  `mkIncrementalAutotoolsPackage` outright.
+
 ### Adding a new ccache-cached package
 
 `mkIncrementalCcachePackage` is the one-call-site way to add ccache
