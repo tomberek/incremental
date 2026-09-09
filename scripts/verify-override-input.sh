@@ -95,6 +95,10 @@ verify_ccache_hits hello-ccache
 # check the same mechanism (a shallow vs. recursive nuke-refs bug
 # regressed exactly this — see git history) against real, sizable
 # nixpkgs packages instead of this repo's own toy examples.
+# nixpkgs-llvm (see nixpkgs-examples.nix) is deliberately excluded
+# here: a cold build took 35+ minutes on 22 cores locally, and
+# ubuntu-latest CI runners have far fewer — verified locally instead,
+# not on every push/PR.
 verify_ccache_hits nixpkgs-jq
 verify_ccache_hits nixpkgs-redis
 verify_ccache_hits nixpkgs-tmux

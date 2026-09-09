@@ -166,7 +166,7 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#hello-ccache
 `--cache-file`: `nix build -L` shows `configure: loading cache
 .../config.cache`, plus a ccache hit rate on rebuild.
 
-### Real nixpkgs packages (nixpkgs-jq, nixpkgs-redis, nixpkgs-tmux, nixpkgs-python3, nixpkgs-perl)
+### Real nixpkgs packages (nixpkgs-jq, nixpkgs-redis, nixpkgs-tmux, nixpkgs-python3, nixpkgs-perl, nixpkgs-llvm)
 
 The above are toy examples; these check whether this is viable on
 something real. `nixpkgs-jq` wraps `pkgs.jq` (same
@@ -217,6 +217,22 @@ command line, so it turned out harmless: confirmed by measuring the
 real ccache hit rate rather than guessing from the flag alone. 99%
 real hits, ~1.6x wall-clock (2m57s → 1m48s).
 
+`nixpkgs-llvm` wraps `pkgs.llvmPackages.llvm` — the "go bigger" test:
+CMake/Ninja, no `./configure` at all, so ccache-only like redis/perl.
+98% real ccache hits (4076/4159); `buildPhase` itself drops from
+35m17s to 1m20s (~26x) restoring a same-source cache. Overall
+wall-clock only improves ~4.5x (10816s → 2377s) because `checkPhase`
+runs LLVM's own `lit`-based test suite on every build regardless of
+caching (432s–550s, ccache never touches it) — the same "high hit
+rate isn't proportional wall-clock" lesson as `tmux`, just at LLVM's
+scale. `nuke-refs` also has meaningfully more work here than at
+python3's scale (thousands of ccache debug-log files vs. hundreds)
+and still completed cleanly — the python3 debug-log leak looks like
+it was specific to that build, not something that gets worse with
+scale on its own. **Not wired into `verify-override-input.sh`/CI**:
+a cold build takes 35+ minutes on 22 local cores, and CI runners have
+far fewer — verified locally instead of on every push/PR.
+
 ```
 $ nix build .#nixpkgs-jq
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-jq
@@ -228,6 +244,8 @@ $ nix build .#nixpkgs-python3
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-python3
 $ nix build .#nixpkgs-perl
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-perl
+$ nix build .#nixpkgs-llvm
+$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-llvm
 ```
 
 Not every C package benefits the same way — tried and dropped as

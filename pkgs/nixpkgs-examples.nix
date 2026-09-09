@@ -34,6 +34,20 @@
 # compile command line — confirmed by measured hit rate, not eval-time
 # guesswork.
 #
+# llvm (mkIncrementalCcachePackage — CMake/Ninja, no ./configure at
+# all) is the real "go bigger" test: 98% real ccache hits (4076/4159),
+# buildPhase itself goes from 35m17s to 1m20s (~26x) restoring a
+# same-source cache. Overall wall-clock only gets ~4.5x (10816s ->
+# 2377s) because checkPhase runs LLVM's own lit-based test suite
+# every build regardless of caching (432s-550s, ccache never touches
+# it) — same "high hit rate doesn't mean proportional wall-clock"
+# lesson as tmux, just at LLVM's scale. nuke-refs also has real work
+# to do here: thousands of ccache debug-log files, more than
+# python3's scale, and it still completed cleanly (no
+# disallowed-reference failures) — the python3 debug-log leak seems
+# to have been something specific to that build, not something
+# proportional to file count.
+#
 # Tried and dropped as examples: curl hits 100% in ccache but shows
 # no real speedup — its build time is dominated by man-page
 # rendering/install, not compilation, so ccache has nothing to save.
@@ -102,12 +116,13 @@ let
 
   # redis-style: ccache-only via mkIncrementalCcachePackage instead of
   # mkIncrementalAutotoolsPackage. Different reasons a package ends up
-  # here: redis and perl have no autoconf ./configure at all (redis: a
-  # plain Makefile; perl: its own Configure script, not autoconf —
-  # confirmed via an empty nativeBuildInputs/no autoreconf-hook), so
-  # --cache-file would be silently useless (or, for perl, not even
-  # understood). python3 *does* have a real ./configure, but its
-  # nixpkgs derivation declares
+  # here: redis, perl, and llvm have no autoconf ./configure at all
+  # (redis: a plain Makefile; perl: its own Configure script, not
+  # autoconf — confirmed via an empty nativeBuildInputs/no
+  # autoreconf-hook; llvm: CMake/Ninja), so --cache-file would be
+  # silently useless (or, for perl/llvm, not even understood).
+  # python3 *does* have a real ./configure, but its nixpkgs derivation
+  # declares
   # outputChecks.out.disallowedReferences on openssl-dev — a
   # composed `incremental` output inherits the same check (confirmed:
   # nix derivation eval shows outputChecks.incremental is identical
