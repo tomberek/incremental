@@ -139,4 +139,5 @@ in
   nixpkgs-tmux = mkNixpkgsExample "nixpkgs-tmux" pkgs.tmux;
   nixpkgs-redis = mkNixpkgsCcacheOnlyExample "nixpkgs-redis" pkgs.redis;
   nixpkgs-python3 = mkNixpkgsCcacheOnlyNoDebugExample "nixpkgs-python3" pkgs.python3;
+  nixpkgs-perl = mkNixpkgsCcacheOnlyExample "nixpkgs-perl" pkgs.perl;
 }
