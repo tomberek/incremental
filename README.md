@@ -209,6 +209,14 @@ examples for instructive reasons:
   `--cache-file` at all (`error: invalid option
   "--cache-file=..."`), so it's incompatible with
   `mkIncrementalAutotoolsPackage` outright.
+- `emacs` (`--with-native-compilation`) was the "go bigger" test —
+  ~16 minutes either way, cold or warm, 1% real ccache hit rate
+  (measured 3/155). Native-lisp `.eln` compilation runs through
+  `libgccjit` in-process during Emacs's own "dump" step, never
+  through `$CC`/ccache — a real, structural blind spot for a
+  C-compiler-wrapping cache, not a bug here. The C sources that *are*
+  visible to ccache also spend a lot of time on `autoconf_test`
+  overhead from emacs's unusually large gnulib-based `./configure`.
 
 ### Adding a new ccache-cached package
 

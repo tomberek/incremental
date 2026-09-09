@@ -32,7 +32,15 @@
 # unique per-build and the hit rate genuinely 0%. nginx's `./configure`
 # isn't autoconf-based and doesn't understand --cache-file at all
 # (`error: invalid option "--cache-file=..."`), so it's incompatible
-# with mkIncrementalAutotoolsPackage outright.
+# with mkIncrementalAutotoolsPackage outright. emacs (--with-native-
+# compilation) is the "go bigger" test that came back genuinely
+# negative: ~16min either way (cold or warm), 1% real ccache hit rate
+# (measured 3/155). Native-lisp .eln compilation runs through
+# libgccjit in-process during Emacs's own "dump" step, never through
+# $CC/ccache at all — a real, structural blind spot for a C-compiler-
+# wrapping cache, not a bug here. The C sources that *are* visible to
+# ccache also eat a lot of autoconf_test overhead from emacs's
+# unusually large gnulib-based ./configure.
 let
   # jq-style: autoconf-based, gets --cache-file too.
   mkNixpkgsExample =
