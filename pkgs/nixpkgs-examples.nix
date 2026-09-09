@@ -67,7 +67,15 @@
 # $CC/ccache at all — a real, structural blind spot for a C-compiler-
 # wrapping cache, not a bug here. The C sources that *are* visible to
 # ccache also eat a lot of autoconf_test overhead from emacs's
-# unusually large gnulib-based ./configure.
+# unusually large gnulib-based ./configure. gcc (pkgs.gcc.cc under
+# ccacheStdenv) is the other side of that same blind spot: 0/0 ccache
+# invocations on a warm rebuild, confirmed by grepping the build log
+# for the ccache binary — GCC bootstraps its own compiler (`xgcc`)
+# once using the host $CC, then uses that self-built xgcc (not the
+# ccache-wrapped host compiler) for the ~2500 compiles of libgcc/
+# libstdc++/libatomic/libsanitizer/etc. that make up the rest of the
+# build. Structurally identical to emacs's libgccjit blind spot, just
+# with GCC compiling itself instead of Lisp.
 let
   # jq-style: autoconf-based, gets --cache-file too.
   mkNixpkgsExample =

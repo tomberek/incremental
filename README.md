@@ -272,6 +272,17 @@ examples for instructive reasons:
   C-compiler-wrapping cache, not a bug here. The C sources that *are*
   visible to ccache also spend a lot of time on `autoconf_test`
   overhead from emacs's unusually large gnulib-based `./configure`.
+- `gcc` (`pkgs.gcc.cc` under `ccacheStdenv`) hits the same blind spot
+  as emacs, just with itself instead of Lisp: 0/0 ccache invocations
+  on a warm rebuild (confirmed by grepping the build log for the
+  ccache binary — it never runs). GCC bootstraps its own compiler
+  (`xgcc`) once using the host `$CC`, then uses that freshly-built
+  `xgcc` — not the ccache-wrapped host compiler — for the ~2500
+  compiles of libgcc/libstdc++/libatomic/libsanitizer/etc. that make
+  up the rest of the build (cold: 732s; warm: 932s, actually slower
+  since ccache adds overhead with zero payoff). Wrapping `xgcc` itself
+  post-bootstrap would need a different mechanism than the
+  `ccacheStdenv` override this repo uses.
 
 ### Adding a new ccache-cached package
 
