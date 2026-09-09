@@ -19,7 +19,12 @@
 # gets ~1.6x (2m -> 1m13s): most of its wall-clock is autoconf's own
 # `./configure` checks and a single-threaded final link, neither of
 # which ccache touches — a real example of "100% cache hits" not
-# implying "proportionally faster", not a bug.
+# implying "proportionally faster", not a bug. python3
+# (mkIncrementalCcachePackage, not autotools — CCACHE_DEBUG disabled,
+# see below) hits 99% but only gets ~1.2x (4m16s -> 3m24s):
+# postInstall runs `python -m compileall` over the entire stdlib
+# three times (plain/-O/-OO), pure Python bytecode compilation ccache
+# never sees, on every build regardless of what changed.
 #
 # Tried and dropped as examples: curl hits 100% in ccache but shows
 # no real speedup — its build time is dominated by man-page
@@ -87,9 +92,33 @@ let
     in
     mkForCache inputs.cache;
 
-  # redis-style: no ./configure at all (plain Makefile) — --cache-file
-  # would be silently useless, so ccache-only via
-  # mkIncrementalCcachePackage instead of mkIncrementalAutotoolsPackage.
+  # redis-style: ccache-only via mkIncrementalCcachePackage instead of
+  # mkIncrementalAutotoolsPackage. Two different reasons a package
+  # ends up here: redis has no ./configure at all (plain Makefile),
+  # so --cache-file would be silently useless. python3 *does* have a
+  # real ./configure, but its nixpkgs derivation declares
+  # outputChecks.out.disallowedReferences on openssl-dev — a
+  # composed `incremental` output inherits the same check (confirmed:
+  # nix derivation eval shows outputChecks.incremental is identical
+  # to outputChecks.out) — and --with-openssl=<path>-dev is a literal
+  # configureFlag, so config.cache legitimately records that path in
+  # its cached check results, tripping the disallowed-reference check
+  # at build time ("output ... is not allowed to refer to ...").
+  # Dropping --cache-file (ccache-only) avoids *that* conflict — but
+  # python3's scale (hundreds of autoconf conftest probes during
+  # configurePhase) surfaced a second, distinct one: ccacheEnv's
+  # CCACHE_DEBUG=1 writes every conftest compile's full command line
+  # (including -I<path>/include) verbatim to $incremental/debug-logs,
+  # and confirmed by direct grep for the exact disallowed store-path
+  # hash: those references survived a nuke-refs pass at this scale
+  # even though the identical mechanism worked on a synthetic
+  # reproduction of the same file content (root cause not fully
+  # isolated — plausibly a write/flush race between ccache's debug-log
+  # writers and the nuke-refs pass's directory listing). Disabling
+  # ccacheEnv's debug logging for this package (unset right after
+  # env.setup) sidesteps needing to scrub those files at all —
+  # confirmed fix, not a guess: 99% real hits, no disallowed-reference
+  # error, reproduced twice.
   mkNixpkgsCcacheOnlyExample =
     name: drv:
     mkIncrementalCcachePackage {
@@ -98,9 +127,16 @@ let
       nuke = true; # see mkNixpkgsExample above for why
       drv = drv.override { stdenv = pkgs.ccacheStdenv; };
     };
+
+  mkNixpkgsCcacheOnlyNoDebugExample =
+    name: drv:
+    (mkNixpkgsCcacheOnlyExample name drv).overrideAttrs (old: {
+      postPatch = old.postPatch + "unset CCACHE_DEBUG CCACHE_DEBUGDIR\n";
+    });
 in
 {
   nixpkgs-jq = mkNixpkgsExample "nixpkgs-jq" pkgs.jq;
   nixpkgs-tmux = mkNixpkgsExample "nixpkgs-tmux" pkgs.tmux;
   nixpkgs-redis = mkNixpkgsCcacheOnlyExample "nixpkgs-redis" pkgs.redis;
+  nixpkgs-python3 = mkNixpkgsCcacheOnlyNoDebugExample "nixpkgs-python3" pkgs.python3;
 }

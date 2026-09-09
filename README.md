@@ -166,7 +166,7 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#hello-ccache
 `--cache-file`: `nix build -L` shows `configure: loading cache
 .../config.cache`, plus a ccache hit rate on rebuild.
 
-### Real nixpkgs packages (nixpkgs-jq, nixpkgs-redis, nixpkgs-tmux)
+### Real nixpkgs packages (nixpkgs-jq, nixpkgs-redis, nixpkgs-tmux, nixpkgs-python3)
 
 The above are toy examples; these check whether this is viable on
 something real. `nixpkgs-jq` wraps `pkgs.jq` (same
@@ -184,6 +184,28 @@ reminder that "100% cache hits" doesn't automatically mean
 "proportionally faster" — it depends on how much of the wall-clock is
 actually compilation.
 
+`nixpkgs-python3` wraps `pkgs.python3` — also ccache-only, but for a
+different reason than redis: python3 *does* have a real `./configure`,
+but its nixpkgs derivation restricts `outputChecks.out` from
+referencing `openssl-dev`, and a composed `incremental` output
+inherits that same restriction. `--with-openssl=<path>-dev` is a
+literal `configureFlags` entry, so `config.cache` would legitimately
+record that exact path — tripping the disallowed-reference check at
+build time. Dropping `--cache-file` avoids *that* conflict, but at
+python3's scale (hundreds of autoconf `conftest` probes)
+`ccacheEnv`'s own `CCACHE_DEBUG=1` writes every probe's full compile
+command line — including the same `-I<path>/include` — verbatim to
+`$incremental/debug-logs`, and those references reproducibly survived
+a `nuke-refs` pass at this scale even though the identical mechanism
+works on a smaller synthetic test. Disabling debug logging for this
+package (`unset CCACHE_DEBUG CCACHE_DEBUGDIR` right after
+`env.setup`) avoids needing to scrub those files at all — confirmed
+fix, reproduced twice: 99% real ccache hit rate, no
+disallowed-reference error, ~1.2x wall-clock (4m16s → 3m24s) since
+`postInstall` also runs `python -m compileall` over the entire stdlib
+three times (plain/`-O`/`-OO`), pure Python bytecode compilation
+ccache never sees, on every build regardless of what changed.
+
 ```
 $ nix build .#nixpkgs-jq
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-jq
@@ -191,6 +213,8 @@ $ nix build .#nixpkgs-redis
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-redis
 $ nix build .#nixpkgs-tmux
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-tmux
+$ nix build .#nixpkgs-python3
+$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-python3
 ```
 
 Not every C package benefits the same way — tried and dropped as
