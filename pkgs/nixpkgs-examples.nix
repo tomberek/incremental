@@ -26,6 +26,14 @@
 # three times (plain/-O/-OO), pure Python bytecode compilation ccache
 # never sees, on every build regardless of what changed.
 #
+# perl (mkIncrementalCcachePackage — Configure isn't autoconf, no
+# --cache-file) hits 99% and gets ~1.6x (2m57s -> 1m48s): its
+# -Dprefix=<placeholder> configureFlag looked like it might repeat
+# openssh's $out-in-flags problem, but that flag only feeds
+# Configure's own bookkeeping (Config.pm generation), never a C
+# compile command line — confirmed by measured hit rate, not eval-time
+# guesswork.
+#
 # Tried and dropped as examples: curl hits 100% in ccache but shows
 # no real speedup — its build time is dominated by man-page
 # rendering/install, not compilation, so ccache has nothing to save.
@@ -93,10 +101,13 @@ let
     mkForCache inputs.cache;
 
   # redis-style: ccache-only via mkIncrementalCcachePackage instead of
-  # mkIncrementalAutotoolsPackage. Two different reasons a package
-  # ends up here: redis has no ./configure at all (plain Makefile),
-  # so --cache-file would be silently useless. python3 *does* have a
-  # real ./configure, but its nixpkgs derivation declares
+  # mkIncrementalAutotoolsPackage. Different reasons a package ends up
+  # here: redis and perl have no autoconf ./configure at all (redis: a
+  # plain Makefile; perl: its own Configure script, not autoconf —
+  # confirmed via an empty nativeBuildInputs/no autoreconf-hook), so
+  # --cache-file would be silently useless (or, for perl, not even
+  # understood). python3 *does* have a real ./configure, but its
+  # nixpkgs derivation declares
   # outputChecks.out.disallowedReferences on openssl-dev — a
   # composed `incremental` output inherits the same check (confirmed:
   # nix derivation eval shows outputChecks.incremental is identical

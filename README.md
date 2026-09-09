@@ -166,7 +166,7 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#hello-ccache
 `--cache-file`: `nix build -L` shows `configure: loading cache
 .../config.cache`, plus a ccache hit rate on rebuild.
 
-### Real nixpkgs packages (nixpkgs-jq, nixpkgs-redis, nixpkgs-tmux, nixpkgs-python3)
+### Real nixpkgs packages (nixpkgs-jq, nixpkgs-redis, nixpkgs-tmux, nixpkgs-python3, nixpkgs-perl)
 
 The above are toy examples; these check whether this is viable on
 something real. `nixpkgs-jq` wraps `pkgs.jq` (same
@@ -206,6 +206,17 @@ disallowed-reference error, ~1.2x wall-clock (4m16s → 3m24s) since
 three times (plain/`-O`/`-OO`), pure Python bytecode compilation
 ccache never sees, on every build regardless of what changed.
 
+`nixpkgs-perl` wraps `pkgs.perl` — ccache-only like redis, since
+perl's own `Configure` script isn't autoconf-based at all (no
+`autoreconf-hook`, no `configurePhase`) and wouldn't understand
+`--cache-file`. Its `configureFlags` includes
+`-Dprefix=<placeholder>`, which looked like it might repeat openssh's
+`$out`-in-flags problem — but that flag only feeds `Configure`'s own
+bookkeeping (`Config.pm` generation), never an actual C compile
+command line, so it turned out harmless: confirmed by measuring the
+real ccache hit rate rather than guessing from the flag alone. 99%
+real hits, ~1.6x wall-clock (2m57s → 1m48s).
+
 ```
 $ nix build .#nixpkgs-jq
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-jq
@@ -215,6 +226,8 @@ $ nix build .#nixpkgs-tmux
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-tmux
 $ nix build .#nixpkgs-python3
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-python3
+$ nix build .#nixpkgs-perl
+$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-perl
 ```
 
 Not every C package benefits the same way — tried and dropped as

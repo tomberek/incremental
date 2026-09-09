@@ -91,14 +91,15 @@ verify_ccache_hits() {
 
 verify_ccache_hits hello-ccache
 
-# nixpkgs-jq/nixpkgs-redis/nixpkgs-tmux/nixpkgs-python3 check the
-# same mechanism (a shallow vs. recursive nuke-refs bug regressed
-# exactly this — see git history) against real, sizable nixpkgs
-# packages instead of this repo's own toy examples.
+# nixpkgs-jq/nixpkgs-redis/nixpkgs-tmux/nixpkgs-python3/nixpkgs-perl
+# check the same mechanism (a shallow vs. recursive nuke-refs bug
+# regressed exactly this — see git history) against real, sizable
+# nixpkgs packages instead of this repo's own toy examples.
 verify_ccache_hits nixpkgs-jq
 verify_ccache_hits nixpkgs-redis
 verify_ccache_hits nixpkgs-tmux
 verify_ccache_hits nixpkgs-python3
+verify_ccache_hits nixpkgs-perl
 
 if [ "$failures" -gt 0 ]; then
   echo "override-input-verify: $failures check(s) failed" >&2
