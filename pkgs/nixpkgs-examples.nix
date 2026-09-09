@@ -151,4 +151,5 @@ in
   nixpkgs-redis = mkNixpkgsCcacheOnlyExample "nixpkgs-redis" pkgs.redis;
   nixpkgs-python3 = mkNixpkgsCcacheOnlyNoDebugExample "nixpkgs-python3" pkgs.python3;
   nixpkgs-perl = mkNixpkgsCcacheOnlyExample "nixpkgs-perl" pkgs.perl;
+  nixpkgs-llvm = mkNixpkgsCcacheOnlyExample "nixpkgs-llvm" pkgs.llvmPackages.llvm;
 }
