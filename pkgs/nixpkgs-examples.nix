@@ -1,10 +1,8 @@
 {
-  inputs,
   system,
   pkgs,
-  mkIncrementalAutotoolsPackage,
+  mkIncrementalCcacheAutotoolsPackage,
   mkIncrementalCcachePackage,
-  ccacheEnv,
 }:
 # Bigger real-world C packages from nixpkgs, to check whether this
 # caching approach is viable for speeding up iteration on something
@@ -80,47 +78,18 @@ let
   # jq-style: autoconf-based, gets --cache-file too.
   mkNixpkgsExample =
     name: drv:
-    let
-      mkForCache =
-        cache:
-        let
-          env = ccacheEnv {
-            inherit pkgs;
-            pname = name;
-            dir = "$incremental";
-            debugDir = "$incremental/debug-logs";
-          };
-        in
-        (mkIncrementalAutotoolsPackage {
-          inherit
-            name
-            system
-            cache
-            pkgs
-            ;
-          cacheVars = [ "CCACHE_DIR" ];
-          # Unlike hello-ccache, this build is big enough that
-          # ccache's cache dir picks up real store-path references
-          # (e.g. from debug info) — without nuke-refs recursing into
-          # every level, that creates a same-derivation cycle between
-          # the incremental and main outputs (confirmed: dropping
-          # this reproduces "cycle detected ... in the references of
-          # output 'bin' from output 'incremental'"). See
-          # lib/mk-incremental.nix's nukeScript.
-          nuke = true;
-          drv = drv.override { stdenv = pkgs.ccacheStdenv; };
-          extraPostInstall = _isCached: env.report;
-        }).overrideAttrs
-          (old: {
-            postPatch = old.postPatch + env.setup;
-            passthru = old.passthru // {
-              withCache =
-                cacheFlake:
-                mkForCache (if builtins.isString cacheFlake then builtins.getFlake cacheFlake else cacheFlake);
-            };
-          });
-    in
-    mkForCache inputs.cache;
+    mkIncrementalCcacheAutotoolsPackage {
+      inherit name system pkgs;
+      # Unlike hello-ccache, this build is big enough that ccache's
+      # cache dir picks up real store-path references (e.g. from
+      # debug info) — without nuke-refs recursing into every level,
+      # that creates a same-derivation cycle between the incremental
+      # and main outputs (confirmed: dropping this reproduces "cycle
+      # detected ... in the references of output 'bin' from output
+      # 'incremental'"). See lib/mk-incremental.nix's nukeScript.
+      nuke = true;
+      drv = drv.override { stdenv = pkgs.ccacheStdenv; };
+    };
 
   # redis-style: ccache-only via mkIncrementalCcachePackage instead of
   # mkIncrementalAutotoolsPackage. Different reasons a package ends up

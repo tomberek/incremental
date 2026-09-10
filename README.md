@@ -97,8 +97,11 @@ right binary regardless.
 `mkIncrementalGoPackage`, `mkIncrementalZigPackage`, and
 `mkIncrementalRustPackage` bake in the right `cacheVars`/`phase` for
 those ecosystems (see "Examples in this repo" below for why each
-needs what it needs). For anything else — autoconf's `--cache-file`,
-a second cache tool doesn't have a wrapper for — compose
+needs what it needs). `mkIncrementalCcachePackage` and
+`mkIncrementalCcacheAutotoolsPackage` do the same for ccache
+specifically — one-call-site wrappers that also handle `ccacheEnv`'s
+setup/report shell and `passthru.withCache` (see "Adding a new
+ccache-cached package" below). For anything else, compose
 `mkIncrementalPackage`/`mkIncrementalAutotoolsPackage` directly.
 
 ## Examples in this repo
@@ -350,6 +353,26 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#c
 - `phase` must be a hook that still runs given whatever the package
   skips — e.g. `preConfigure` lives inside `configurePhase`, so
   `dontConfigure = true` skips both. `postPatch` always runs.
+
+If the package also has a real autoconf `./configure`,
+`mkIncrementalCcacheAutotoolsPackage` layers ccache on top of
+`mkIncrementalAutotoolsPackage`'s `--cache-file` instead — same
+`ccacheEnv`/`withCache` wiring, no `phase` (it's always `postPatch`,
+same reason as above) or `cacheVars` (always `CCACHE_DIR`) to pass.
+`hello-ccache` is the worked example:
+
+```nix
+hello-ccache = mkIncrementalCcacheAutotoolsPackage {
+  name = "hello-ccache";
+  inherit system pkgs;
+  drv = pkgs.hello.override { stdenv = pkgs.ccacheStdenv; };
+};
+```
+
+`nuke` defaults to `false` here (small builds like `hello` don't pick
+up real store-path references in ccache's own manifest); the
+nixpkgs-jq-style examples above pass `nuke = true` explicitly once a
+build is big enough that they do — see `pkgs/nixpkgs-examples.nix`.
 
 ### NixOS/nix itself (nix-incremental)
 

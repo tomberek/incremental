@@ -10,6 +10,7 @@ let
     mkIncrementalAutotoolsPackage
     mkIncrementalGoPackage
     mkIncrementalCcachePackage
+    mkIncrementalCcacheAutotoolsPackage
     mkIncrementalZigPackage
     mkIncrementalRustPackage
     mkIncrementalNixComponents
@@ -19,11 +20,9 @@ in
 {
   hello-ccache = import ./hello-ccache.nix {
     inherit
-      inputs
       system
       pkgs
-      mkIncrementalAutotoolsPackage
-      ccacheEnv
+      mkIncrementalCcacheAutotoolsPackage
       ;
   };
   golang = import ./golang.nix { inherit system pkgs mkIncrementalGoPackage; };
@@ -33,12 +32,10 @@ in
 }
 // import ./nixpkgs-examples.nix {
   inherit
-    inputs
     system
     pkgs
-    mkIncrementalAutotoolsPackage
+    mkIncrementalCcacheAutotoolsPackage
     mkIncrementalCcachePackage
-    ccacheEnv
     ;
 }
 // import ./nix-components.nix {
