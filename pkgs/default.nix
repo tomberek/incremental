@@ -32,6 +32,7 @@ in
 }
 // import ./nixpkgs-examples.nix {
   inherit
+    lib
     system
     pkgs
     mkIncrementalCcacheAutotoolsPackage

@@ -1,4 +1,5 @@
 {
+  lib,
   system,
   pkgs,
   mkIncrementalCcacheAutotoolsPackage,
@@ -12,39 +13,36 @@
 #
 # jq works well: ~2x wall-clock speedup restoring a warm cache
 # (measured 51s -> 23s), 95% real ccache hit rate on a no-op rebuild.
-# redis (mkIncrementalCcachePackage, below — no ./configure) does
-# even better: 4m46s -> 42s, 96% real hits. tmux hits 100% but only
-# gets ~1.6x (2m -> 1m13s): most of its wall-clock is autoconf's own
+# redis (ccacheOnly = true, below — no ./configure) does even better:
+# 4m46s -> 42s, 96% real hits. tmux hits 100% but only gets ~1.6x
+# (2m -> 1m13s): most of its wall-clock is autoconf's own
 # `./configure` checks and a single-threaded final link, neither of
 # which ccache touches — a real example of "100% cache hits" not
-# implying "proportionally faster", not a bug. python3
-# (mkIncrementalCcachePackage, not autotools — CCACHE_DEBUG disabled,
-# see below) hits 99% but only gets ~1.2x (4m16s -> 3m24s):
+# implying "proportionally faster", not a bug. python3 (ccacheOnly,
+# noDebug — see below) hits 99% but only gets ~1.2x (4m16s -> 3m24s):
 # postInstall runs `python -m compileall` over the entire stdlib
 # three times (plain/-O/-OO), pure Python bytecode compilation ccache
 # never sees, on every build regardless of what changed.
 #
-# perl (mkIncrementalCcachePackage — Configure isn't autoconf, no
-# --cache-file) hits 99% and gets ~1.6x (2m57s -> 1m48s): its
-# -Dprefix=<placeholder> configureFlag looked like it might repeat
-# openssh's $out-in-flags problem, but that flag only feeds
-# Configure's own bookkeeping (Config.pm generation), never a C
-# compile command line — confirmed by measured hit rate, not eval-time
-# guesswork.
+# perl (ccacheOnly — Configure isn't autoconf, no --cache-file) hits
+# 99% and gets ~1.6x (2m57s -> 1m48s): its -Dprefix=<placeholder>
+# configureFlag looked like it might repeat openssh's $out-in-flags
+# problem, but that flag only feeds Configure's own bookkeeping
+# (Config.pm generation), never a C compile command line — confirmed
+# by measured hit rate, not eval-time guesswork.
 #
-# llvm (mkIncrementalCcachePackage — CMake/Ninja, no ./configure at
-# all) is the real "go bigger" test: 98% real ccache hits (4076/4159),
-# buildPhase itself goes from 35m17s to 1m20s (~26x) restoring a
-# same-source cache. Overall wall-clock only gets ~4.5x (10816s ->
-# 2377s) because checkPhase runs LLVM's own lit-based test suite
-# every build regardless of caching (432s-550s, ccache never touches
-# it) — same "high hit rate doesn't mean proportional wall-clock"
-# lesson as tmux, just at LLVM's scale. nuke-refs also has real work
-# to do here: thousands of ccache debug-log files, more than
-# python3's scale, and it still completed cleanly (no
-# disallowed-reference failures) — the python3 debug-log leak seems
-# to have been something specific to that build, not something
-# proportional to file count.
+# llvm (ccacheOnly — CMake/Ninja, no ./configure at all) is the real
+# "go bigger" test: 98% real ccache hits (4076/4159), buildPhase
+# itself goes from 35m17s to 1m20s (~26x) restoring a same-source
+# cache. Overall wall-clock only gets ~4.5x (10816s -> 2377s) because
+# checkPhase runs LLVM's own lit-based test suite every build
+# regardless of caching (432s-550s, ccache never touches it) — same
+# "high hit rate doesn't mean proportional wall-clock" lesson as
+# tmux, just at LLVM's scale. nuke-refs also has real work to do
+# here: thousands of ccache debug-log files, more than python3's
+# scale, and it still completed cleanly (no disallowed-reference
+# failures) — the python3 debug-log leak seems to have been something
+# specific to that build, not something proportional to file count.
 #
 # Tried and dropped as examples: curl hits 100% in ccache but shows
 # no real speedup — its build time is dominated by man-page
@@ -75,97 +73,155 @@
 # build. Structurally identical to emacs's libgccjit blind spot, just
 # with GCC compiling itself instead of Lisp.
 let
-  # jq-style: autoconf-based, gets --cache-file too.
+  # One example ends up in one of three shapes:
+  # - autotools (jq, tmux): real ./configure, gets --cache-file too.
+  # - ccacheOnly (redis, perl, llvm): no autoconf ./configure at all
+  #   (redis: plain Makefile; perl: its own Configure, not autoconf —
+  #   confirmed via empty nativeBuildInputs/no autoreconf-hook; llvm:
+  #   CMake/Ninja), so --cache-file would be silently useless (or,
+  #   for perl/llvm, not even understood).
+  # - ccacheOnly + noDebug (python3): *does* have a real ./configure,
+  #   but its nixpkgs derivation declares
+  #   outputChecks.out.disallowedReferences on openssl-dev — a
+  #   composed `incremental` output inherits the same check
+  #   (confirmed: nix derivation eval shows outputChecks.incremental
+  #   is identical to outputChecks.out) — and --with-openssl=<path>-dev
+  #   is a literal configureFlag, so config.cache legitimately
+  #   records that path in its cached check results, tripping the
+  #   disallowed-reference check at build time ("output ... is not
+  #   allowed to refer to ..."). Dropping --cache-file (ccacheOnly)
+  #   avoids *that* conflict — but python3's scale (hundreds of
+  #   autoconf conftest probes during configurePhase) surfaced a
+  #   second, distinct one: ccacheEnv's CCACHE_DEBUG=1 writes every
+  #   conftest compile's full command line (including -I<path>/include)
+  #   verbatim to $incremental/debug-logs, and confirmed by direct
+  #   grep for the exact disallowed store-path hash: those references
+  #   survived a nuke-refs pass at this scale even though the
+  #   identical mechanism worked on a synthetic reproduction of the
+  #   same file content (root cause not fully isolated — plausibly a
+  #   write/flush race between ccache's debug-log writers and the
+  #   nuke-refs pass's directory listing). Disabling ccacheEnv's debug
+  #   logging for this package (unset right after env.setup)
+  #   sidesteps needing to scrub those files at all — confirmed fix,
+  #   not a guess: 99% real hits, no disallowed-reference error,
+  #   reproduced twice.
   mkNixpkgsExample =
-    name: drv:
-    mkIncrementalCcacheAutotoolsPackage {
-      inherit name system pkgs;
-      # Unlike hello-ccache, this build is big enough that ccache's
-      # cache dir picks up real store-path references (e.g. from
-      # debug info) — without nuke-refs recursing into every level,
-      # that creates a same-derivation cycle between the incremental
-      # and main outputs (confirmed: dropping this reproduces "cycle
-      # detected ... in the references of output 'bin' from output
-      # 'incremental'"). See lib/mk-incremental.nix's nukeScript.
-      nuke = true;
-      drv = drv.override { stdenv = pkgs.ccacheStdenv; };
-    };
+    {
+      name,
+      drv,
+      ccacheOnly ? false,
+      noDebug ? false,
+    }:
+    let
+      base =
+        if ccacheOnly then
+          mkIncrementalCcachePackage {
+            inherit name system pkgs;
+            phase = "postPatch"; # always runs, even with no configurePhase
+            nuke = true; # see the big comment above for why
+            drv = drv.override { stdenv = pkgs.ccacheStdenv; };
+          }
+        else
+          mkIncrementalCcacheAutotoolsPackage {
+            inherit name system pkgs;
+            # Unlike hello-ccache, this build is big enough that
+            # ccache's cache dir picks up real store-path references
+            # (e.g. from debug info) — without nuke-refs recursing
+            # into every level, that creates a same-derivation cycle
+            # between the incremental and main outputs (confirmed:
+            # dropping this reproduces "cycle detected ... in the
+            # references of output 'bin' from output 'incremental'").
+            # See lib/mk-incremental.nix's nukeScript.
+            nuke = true;
+            drv = drv.override { stdenv = pkgs.ccacheStdenv; };
+          };
+    in
+    if noDebug then
+      base.overrideAttrs (old: {
+        postPatch = old.postPatch + "unset CCACHE_DEBUG CCACHE_DEBUGDIR\n";
+      })
+    else
+      base;
 
-  # redis-style: ccache-only via mkIncrementalCcachePackage instead of
-  # mkIncrementalAutotoolsPackage. Different reasons a package ends up
-  # here: redis, perl, and llvm have no autoconf ./configure at all
-  # (redis: a plain Makefile; perl: its own Configure script, not
-  # autoconf — confirmed via an empty nativeBuildInputs/no
-  # autoreconf-hook; llvm: CMake/Ninja), so --cache-file would be
-  # silently useless (or, for perl/llvm, not even understood).
-  # python3 *does* have a real ./configure, but its nixpkgs derivation
-  # declares
-  # outputChecks.out.disallowedReferences on openssl-dev — a
-  # composed `incremental` output inherits the same check (confirmed:
-  # nix derivation eval shows outputChecks.incremental is identical
-  # to outputChecks.out) — and --with-openssl=<path>-dev is a literal
-  # configureFlag, so config.cache legitimately records that path in
-  # its cached check results, tripping the disallowed-reference check
-  # at build time ("output ... is not allowed to refer to ...").
-  # Dropping --cache-file (ccache-only) avoids *that* conflict — but
-  # python3's scale (hundreds of autoconf conftest probes during
-  # configurePhase) surfaced a second, distinct one: ccacheEnv's
-  # CCACHE_DEBUG=1 writes every conftest compile's full command line
-  # (including -I<path>/include) verbatim to $incremental/debug-logs,
-  # and confirmed by direct grep for the exact disallowed store-path
-  # hash: those references survived a nuke-refs pass at this scale
-  # even though the identical mechanism worked on a synthetic
-  # reproduction of the same file content (root cause not fully
-  # isolated — plausibly a write/flush race between ccache's debug-log
-  # writers and the nuke-refs pass's directory listing). Disabling
-  # ccacheEnv's debug logging for this package (unset right after
-  # env.setup) sidesteps needing to scrub those files at all —
-  # confirmed fix, not a guess: 99% real hits, no disallowed-reference
-  # error, reproduced twice.
-  mkNixpkgsCcacheOnlyExample =
-    name: drv:
-    mkIncrementalCcachePackage {
-      inherit name system pkgs;
-      phase = "postPatch"; # always runs, even with no configurePhase
-      nuke = true; # see mkNixpkgsExample above for why
-      drv = drv.override { stdenv = pkgs.ccacheStdenv; };
-    };
-
-  mkNixpkgsCcacheOnlyNoDebugExample =
-    name: drv:
-    (mkNixpkgsCcacheOnlyExample name drv).overrideAttrs (old: {
-      postPatch = old.postPatch + "unset CCACHE_DEBUG CCACHE_DEBUGDIR\n";
-    });
+  # Each entry's `-patched` sibling applies one small, real upstream
+  # commit (patches/, one per package — see the commit each was
+  # fetched from in that file's header) on top of the unpatched
+  # package, sharing its cache key. Restoring from the unpatched
+  # build's cache and building the patched one exercises a genuine
+  # single-file source diff, not a no-op same-source rebuild — see
+  # README.md.
+  examples = [
+    {
+      name = "nixpkgs-jq";
+      drv = pkgs.jq;
+      patch = ../patches/jq-isspace-cast.patch;
+    }
+    {
+      name = "nixpkgs-tmux";
+      drv = pkgs.tmux;
+      patch = ../patches/tmux-cmd-find-relative-targets.patch;
+    }
+    {
+      name = "nixpkgs-redis";
+      drv = pkgs.redis;
+      ccacheOnly = true;
+      patch = ../patches/redis-restore-ttl-overflow.patch;
+    }
+    {
+      name = "nixpkgs-python3";
+      drv = pkgs.python3;
+      ccacheOnly = true;
+      noDebug = true;
+      patch = ../patches/python3-struct-pack-empty-pascal.patch;
+    }
+    {
+      name = "nixpkgs-perl";
+      drv = pkgs.perl;
+      ccacheOnly = true;
+      patch = ../patches/perl-regcomp-study-indent.patch;
+    }
+    {
+      name = "nixpkgs-llvm";
+      drv = pkgs.llvmPackages.llvm;
+      ccacheOnly = true;
+      patch = ../patches/llvm-memdep-reverse-map-helper.patch;
+    }
+  ];
 in
-{
-  # Each "-patched" variant applies one small, real upstream commit
-  # (patches/, one per package — see the commit each was fetched from
-  # in that file's header) on top of the unpatched package below it,
-  # sharing its cache key. Restoring from the unpatched build's cache
-  # and building the patched one exercises a genuine single-file
-  # source diff, not a no-op same-source rebuild — see README.md.
-  nixpkgs-jq = mkNixpkgsExample "nixpkgs-jq" pkgs.jq;
-  nixpkgs-jq-patched = mkNixpkgsExample "nixpkgs-jq" (pkgs.jq.overrideAttrs (old: {
-    patches = (old.patches or [ ]) ++ [ ../patches/jq-isspace-cast.patch ];
-  }));
-  nixpkgs-tmux = mkNixpkgsExample "nixpkgs-tmux" pkgs.tmux;
-  nixpkgs-tmux-patched = mkNixpkgsExample "nixpkgs-tmux" (pkgs.tmux.overrideAttrs (old: {
-    patches = (old.patches or [ ]) ++ [ ../patches/tmux-cmd-find-relative-targets.patch ];
-  }));
-  nixpkgs-redis = mkNixpkgsCcacheOnlyExample "nixpkgs-redis" pkgs.redis;
-  nixpkgs-redis-patched = mkNixpkgsCcacheOnlyExample "nixpkgs-redis" (pkgs.redis.overrideAttrs (old: {
-    patches = (old.patches or [ ]) ++ [ ../patches/redis-restore-ttl-overflow.patch ];
-  }));
-  nixpkgs-python3 = mkNixpkgsCcacheOnlyNoDebugExample "nixpkgs-python3" pkgs.python3;
-  nixpkgs-python3-patched = mkNixpkgsCcacheOnlyNoDebugExample "nixpkgs-python3" (pkgs.python3.overrideAttrs (old: {
-    patches = (old.patches or [ ]) ++ [ ../patches/python3-struct-pack-empty-pascal.patch ];
-  }));
-  nixpkgs-perl = mkNixpkgsCcacheOnlyExample "nixpkgs-perl" pkgs.perl;
-  nixpkgs-perl-patched = mkNixpkgsCcacheOnlyExample "nixpkgs-perl" (pkgs.perl.overrideAttrs (old: {
-    patches = (old.patches or [ ]) ++ [ ../patches/perl-regcomp-study-indent.patch ];
-  }));
-  nixpkgs-llvm = mkNixpkgsCcacheOnlyExample "nixpkgs-llvm" pkgs.llvmPackages.llvm;
-  nixpkgs-llvm-patched = mkNixpkgsCcacheOnlyExample "nixpkgs-llvm" (pkgs.llvmPackages.llvm.overrideAttrs (old: {
-    patches = (old.patches or [ ]) ++ [ ../patches/llvm-memdep-reverse-map-helper.patch ];
-  }));
-}
+lib.listToAttrs (
+  lib.concatMap (
+    {
+      name,
+      drv,
+      patch,
+      ...
+    }@args:
+    let
+      mkArgs =
+        drv:
+        builtins.removeAttrs args [
+          "patch"
+          "drv"
+        ]
+        // {
+          inherit name drv;
+        };
+    in
+    [
+      {
+        inherit name;
+        value = mkNixpkgsExample (mkArgs drv);
+      }
+      {
+        name = "${name}-patched";
+        value = mkNixpkgsExample (
+          mkArgs (
+            drv.overrideAttrs (old: {
+              patches = (old.patches or [ ]) ++ [ patch ];
+            })
+          )
+        );
+      }
+    ]
+  ) examples
+)
