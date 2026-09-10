@@ -1,0 +1,22 @@
+From 579e6f76cffd7643ba4002a2c3618a5ea710589a Mon Sep 17 00:00:00 2001
+From: Thomas Klausner <wiz@gatalith.at>
+Date: Thu, 2 Jul 2026 07:45:10 +0200
+Subject: [PATCH] Cast char to unsigned char before passing to isspace (#3574)
+
+---
+ src/main.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/main.c b/src/main.c
+index fb5c7ab8e3..1ab5dec233 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -437,7 +437,7 @@ int main(int argc, char* argv[]) {
+           errno = 0;
+           long indent = strtol(argv[i+1], &end, 10);
+           if (errno || indent < -1 || indent > 7 ||
+-              isspace(*argv[i+1]) || end == argv[i+1] || *end) {
++              isspace((unsigned char)*argv[i+1]) || end == argv[i+1] || *end) {
+             fprintf(stderr, "jq: --indent takes a number between -1 and 7\n");
+             die();
+           }

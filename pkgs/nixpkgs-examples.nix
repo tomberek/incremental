@@ -169,10 +169,34 @@ let
     });
 in
 {
+  # Each "-patched" variant applies one small, real upstream commit
+  # (patches/, one per package — see the commit each was fetched from
+  # in that file's header) on top of the unpatched package below it,
+  # sharing its cache key. Restoring from the unpatched build's cache
+  # and building the patched one exercises a genuine single-file
+  # source diff, not a no-op same-source rebuild — see README.md.
   nixpkgs-jq = mkNixpkgsExample "nixpkgs-jq" pkgs.jq;
+  nixpkgs-jq-patched = mkNixpkgsExample "nixpkgs-jq" (pkgs.jq.overrideAttrs (old: {
+    patches = (old.patches or [ ]) ++ [ ../patches/jq-isspace-cast.patch ];
+  }));
   nixpkgs-tmux = mkNixpkgsExample "nixpkgs-tmux" pkgs.tmux;
+  nixpkgs-tmux-patched = mkNixpkgsExample "nixpkgs-tmux" (pkgs.tmux.overrideAttrs (old: {
+    patches = (old.patches or [ ]) ++ [ ../patches/tmux-cmd-find-relative-targets.patch ];
+  }));
   nixpkgs-redis = mkNixpkgsCcacheOnlyExample "nixpkgs-redis" pkgs.redis;
+  nixpkgs-redis-patched = mkNixpkgsCcacheOnlyExample "nixpkgs-redis" (pkgs.redis.overrideAttrs (old: {
+    patches = (old.patches or [ ]) ++ [ ../patches/redis-restore-ttl-overflow.patch ];
+  }));
   nixpkgs-python3 = mkNixpkgsCcacheOnlyNoDebugExample "nixpkgs-python3" pkgs.python3;
+  nixpkgs-python3-patched = mkNixpkgsCcacheOnlyNoDebugExample "nixpkgs-python3" (pkgs.python3.overrideAttrs (old: {
+    patches = (old.patches or [ ]) ++ [ ../patches/python3-struct-pack-empty-pascal.patch ];
+  }));
   nixpkgs-perl = mkNixpkgsCcacheOnlyExample "nixpkgs-perl" pkgs.perl;
+  nixpkgs-perl-patched = mkNixpkgsCcacheOnlyExample "nixpkgs-perl" (pkgs.perl.overrideAttrs (old: {
+    patches = (old.patches or [ ]) ++ [ ../patches/perl-regcomp-study-indent.patch ];
+  }));
   nixpkgs-llvm = mkNixpkgsCcacheOnlyExample "nixpkgs-llvm" pkgs.llvmPackages.llvm;
+  nixpkgs-llvm-patched = mkNixpkgsCcacheOnlyExample "nixpkgs-llvm" (pkgs.llvmPackages.llvm.overrideAttrs (old: {
+    patches = (old.patches or [ ]) ++ [ ../patches/llvm-memdep-reverse-map-helper.patch ];
+  }));
 }

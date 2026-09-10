@@ -1,0 +1,29 @@
+From a3b12f0cd5337230199fc9c6319cc2c4614f75b8 Mon Sep 17 00:00:00 2001
+From: Oscar Priego <oscar.priegov@gmail.com>
+Date: Tue, 8 Sep 2026 06:46:54 -0600
+Subject: [PATCH] [MemDep] Use RemoveFromReverseMap helper consistently
+
+MemoryDependenceResults::getNonLocalPointerDependency() erased the
+reverse-map entry by hand instead of using the existing
+RemoveFromReverseMap helper used everywhere else in this file — no
+functional change, but inconsistent with the rest of the file's style.
+---
+ lib/Analysis/MemoryDependenceAnalysis.cpp | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/lib/Analysis/MemoryDependenceAnalysis.cpp b/lib/Analysis/MemoryDependenceAnalysis.cpp
+index 0ccaadaa1dfb7..a58608b53bb1f 100644
+--- a/lib/Analysis/MemoryDependenceAnalysis.cpp
++++ b/lib/Analysis/MemoryDependenceAnalysis.cpp
+@@ -845,8 +845,9 @@ void MemoryDependenceResults::getNonLocalPointerDependency(
+     auto NonLocalDefIt = NonLocalDefsCache.find(QueryInst);
+     if (NonLocalDefIt != NonLocalDefsCache.end()) {
+       Result.push_back(NonLocalDefIt->second);
+-      ReverseNonLocalDefsCache[NonLocalDefIt->second.getResult().getInst()]
+-          .erase(QueryInst);
++      RemoveFromReverseMap<const Value *>(
++          ReverseNonLocalDefsCache, NonLocalDefIt->second.getResult().getInst(),
++          QueryInst);
+       NonLocalDefsCache.erase(NonLocalDefIt);
+       return;
+     }

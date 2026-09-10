@@ -1,0 +1,23 @@
+From 1ef8980377505a164ce3b283183f0ef905efa2e8 Mon Sep 17 00:00:00 2001
+From: David Mitchell <davem@iabyn.com>
+Date: Mon, 31 Aug 2026 10:41:35 +0100
+Subject: [PATCH] regcomp_study.c: fix an indentation
+
+One line had an indentation that wasn't 4n.
+---
+ regcomp_study.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/regcomp_study.c b/regcomp_study.c
+index 0ad19acd5332..e05761a4bf91 100644
+--- a/regcomp_study.c
++++ b/regcomp_study.c
+@@ -2519,7 +2519,7 @@
+                    regex pos at the \s*, the prospects for a match depend not
+                    only on the input position but also on how many (bar\s*)
+                    repeats into the {4,8} we are. */
+-               if ((mincount > 1) || (maxcount > 1 && maxcount != REG_INFTY))
++                if ((mincount > 1) || (maxcount > 1 && maxcount != REG_INFTY))
+                     f &= ~SCF_WHILEM_VISITED_POS;
+
+                 /* This will finish on WHILEM, setting scan, or on NULL: */

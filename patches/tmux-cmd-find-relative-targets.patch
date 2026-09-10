@@ -1,0 +1,44 @@
+From 00f3899aea035666fa9e7bd60bc7c2cf36c8e745 Mon Sep 17 00:00:00 2001
+From: nicm <nicm@openbsd.org>
+Date: Mon, 7 Sep 2026 12:05:12 +0000
+Subject: [PATCH] Error on invalid relative targets, such as +foo or -0. GitHub
+ issue 5576 from imcusg at gmail dot com.
+
+---
+ cmd-find.c | 18 +++++++++++-------
+ 1 file changed, 11 insertions(+), 7 deletions(-)
+
+diff --git a/cmd-find.c b/cmd-find.c
+index b872d9effa..461d44a2f7 100644
+--- a/cmd-find.c
++++ b/cmd-find.c
+@@ -389,9 +389,11 @@ cmd_find_get_window_with_session(struct cmd_find_state *fs, const char *window)
+ 
+ 	/* Try as an offset. */
+ 	if (!exact && (window[0] == '+' || window[0] == '-')) {
+-		if (window[1] != '\0')
+-			n = strtonum(window + 1, 1, INT_MAX, NULL);
+-		else
++		if (window[1] != '\0') {
++			n = strtonum(window + 1, 1, INT_MAX, &errstr);
++			if (errstr != NULL)
++				return (-1);
++		} else
+ 			n = 1;
+ 		s = fs->s;
+ 		if (fs->flags & CMD_FIND_WINDOW_INDEX) {
+@@ -627,9 +629,11 @@ cmd_find_get_pane_with_window(struct cmd_find_state *fs, const char *pane)
+ 
+ 	/* Try as an offset. */
+ 	if (pane[0] == '+' || pane[0] == '-') {
+-		if (pane[1] != '\0')
+-			n = strtonum(pane + 1, 1, INT_MAX, NULL);
+-		else
++		if (pane[1] != '\0') {
++			n = strtonum(pane + 1, 1, INT_MAX, &errstr);
++			if (errstr != NULL)
++				return (-1);
++		} else
+ 			n = 1;
+ 		wp = fs->w->active;
+ 		if (pane[0] == '+')

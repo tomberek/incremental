@@ -1,0 +1,29 @@
+From 48cc562064dbb52ef3f9cc1a5aa32db6811f5871 Mon Sep 17 00:00:00 2001
+From: JunHwan <devjunsday@gmail.com>
+Date: Tue, 8 Sep 2026 09:43:21 +0900
+Subject: [PATCH] Fix overflowing relative TTL in RESTORE (#15756)
+
+Use add_overflow_ll() when converting the relative TTL to an absolute
+timestamp and reply with the existing "invalid expire time" error
+before touching the key, instead of silently wrapping to a negative
+timestamp that then reads as already-expired.
+---
+ src/cluster.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/cluster.c b/src/cluster.c
+index 01dee731e1d..b6683f13da5 100644
+--- a/src/cluster.c
++++ b/src/cluster.c
+@@ -280,7 +280,10 @@ void restoreCommand(client *c) {
+
+     /* Compute TTL early so we can add it to metadata spec in correct order */
+     if (ttl) {
+-        if (!absttl) ttl+=commandTimeSnapshot();
++        if (!absttl && add_overflow_ll(ttl, commandTimeSnapshot(), &ttl)) {
++            addReplyErrorExpireTime(c);
++            return;
++        }
+         keyMetaSpecAdd(&keymeta, KEY_META_ID_EXPIRE, ttl);
+     }
+

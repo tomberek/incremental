@@ -248,6 +248,39 @@ $ nix build .#nixpkgs-llvm
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-llvm
 ```
 
+Everything above restores from a same-source build — it proves the
+restore/`nuke-refs` mechanism doesn't have false negatives, but not
+that a real code change only invalidates what it touches. Each
+`nixpkgs-*-patched` variant (`nixpkgs-jq-patched`,
+`nixpkgs-redis-patched`, `nixpkgs-tmux-patched`,
+`nixpkgs-python3-patched`, `nixpkgs-perl-patched`,
+`nixpkgs-llvm-patched`) applies one small, real upstream commit (see
+`patches/`) on top of the unpatched package. It shares the unpatched
+package's cache key (same `name` passed to `mkIncremental`), so
+restoring from the unpatched build's cache and building the patched
+one exercises a genuine single-file diff instead of a no-op rebuild.
+Every one of these, at every scale tested, drops by roughly the
+number of files the patch actually touches and no more — e.g.
+`nixpkgs-jq-patched` (one line in `src/main.c`) hits 23/24 (95%,
+same as `nixpkgs-jq`'s unpatched 95%, minus the one file);
+`nixpkgs-llvm-patched` (one function in
+`llvm/lib/Analysis/MemoryDependenceAnalysis.cpp`) hits 4075/4159
+(97.9%, vs. `nixpkgs-llvm`'s unpatched 98.0%) even at LLVM's ~4200-TU
+scale. `nixpkgs-llvm-patched` is excluded from CI for the same reason
+as `nixpkgs-llvm` above.
+
+```
+$ nix build .#nixpkgs-jq
+$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-jq-patched
+```
+
+`nixpkgs-jq-patched` is `pkgs.jq` plus one real upstream patch (see
+`patches/`) applied via `overrideAttrs` — the point isn't the
+`nix build` invocation (identical to any other package), it's that
+`.#nixpkgs-jq-patched` shares `nixpkgs-jq`'s cache key, so the second
+build above restores real, unmodified ccache state and only
+recompiles the one file the patch touches.
+
 Not every C package benefits the same way — tried and dropped as
 examples for instructive reasons:
 
