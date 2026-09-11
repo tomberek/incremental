@@ -2,7 +2,6 @@
   lib,
   system,
   pkgs,
-  mkIncrementalCcacheAutotoolsPackage,
   mkIncrementalCcachePackage,
 }:
 # Bigger real-world C packages from nixpkgs, to check whether this
@@ -113,28 +112,21 @@ let
       noDebug ? false,
     }:
     let
-      base =
-        if ccacheOnly then
-          mkIncrementalCcachePackage {
-            inherit name system pkgs;
-            phase = "postPatch"; # always runs, even with no configurePhase
-            nuke = true; # see the big comment above for why
-            drv = drv.override { stdenv = pkgs.ccacheStdenv; };
-          }
-        else
-          mkIncrementalCcacheAutotoolsPackage {
-            inherit name system pkgs;
-            # Unlike hello-ccache, this build is big enough that
-            # ccache's cache dir picks up real store-path references
-            # (e.g. from debug info) — without nuke-refs recursing
-            # into every level, that creates a same-derivation cycle
-            # between the incremental and main outputs (confirmed:
-            # dropping this reproduces "cycle detected ... in the
-            # references of output 'bin' from output 'incremental'").
-            # See lib/mk-incremental.nix's nukeScript.
-            nuke = true;
-            drv = drv.override { stdenv = pkgs.ccacheStdenv; };
-          };
+      base = mkIncrementalCcachePackage {
+        inherit name system pkgs;
+        autotools = !ccacheOnly;
+        phase = "postPatch"; # always runs, even with no configurePhase
+        # Unlike hello-ccache, these builds are big enough that
+        # ccache's cache dir picks up real store-path references
+        # (e.g. from debug info) — without nuke-refs recursing into
+        # every level, that creates a same-derivation cycle between
+        # the incremental and main outputs (confirmed: dropping this
+        # reproduces "cycle detected ... in the references of output
+        # 'bin' from output 'incremental'"). See
+        # lib/mk-incremental.nix's nukeScript.
+        nuke = true;
+        drv = drv.override { stdenv = pkgs.ccacheStdenv; };
+      };
     in
     if noDebug then
       base.overrideAttrs (old: {

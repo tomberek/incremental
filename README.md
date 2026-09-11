@@ -97,11 +97,12 @@ right binary regardless.
 `mkIncrementalGoPackage`, `mkIncrementalZigPackage`, and
 `mkIncrementalRustPackage` bake in the right `cacheVars`/`phase` for
 those ecosystems (see "Examples in this repo" below for why each
-needs what it needs). `mkIncrementalCcachePackage` and
-`mkIncrementalCcacheAutotoolsPackage` do the same for ccache
-specifically — one-call-site wrappers that also handle `ccacheEnv`'s
-setup/report shell and `passthru.withCache` (see "Adding a new
-ccache-cached package" below). For anything else, compose
+needs what it needs). `mkIncrementalCcachePackage` does the same for
+ccache specifically — a one-call-site wrapper that also handles
+`ccacheEnv`'s setup/report shell and `passthru.withCache` (see
+"Adding a new ccache-cached package" below); pass `autotools = true`
+to additionally layer on `mkIncrementalAutotoolsPackage`'s
+`--cache-file`. For anything else, compose
 `mkIncrementalPackage`/`mkIncrementalAutotoolsPackage` directly.
 
 ## Examples in this repo
@@ -354,17 +355,19 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#c
   skips — e.g. `preConfigure` lives inside `configurePhase`, so
   `dontConfigure = true` skips both. `postPatch` always runs.
 
-If the package also has a real autoconf `./configure`,
-`mkIncrementalCcacheAutotoolsPackage` layers ccache on top of
-`mkIncrementalAutotoolsPackage`'s `--cache-file` instead — same
-`ccacheEnv`/`withCache` wiring, no `phase` (it's always `postPatch`,
-same reason as above) or `cacheVars` (always `CCACHE_DIR`) to pass.
-`hello-ccache` is the worked example:
+If the package also has a real autoconf `./configure`, pass
+`autotools = true` to layer ccache on top of
+`mkIncrementalAutotoolsPackage`'s `--cache-file` instead — `phase` is
+then fixed to `postPatch` (dropped from the call, not just defaulted:
+`--cache-file`'s own restore has to already be live at that point)
+and `cacheVars` stays `CCACHE_DIR` either way. `hello-ccache` is the
+worked example:
 
 ```nix
-hello-ccache = mkIncrementalCcacheAutotoolsPackage {
+hello-ccache = mkIncrementalCcachePackage {
   name = "hello-ccache";
   inherit system pkgs;
+  autotools = true;
   drv = pkgs.hello.override { stdenv = pkgs.ccacheStdenv; };
 };
 ```

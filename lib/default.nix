@@ -33,15 +33,6 @@ let
       lib
       mkIncremental
       mkIncrementalPackage
-      ccacheEnv
-      resolveCache
-      ;
-  };
-  mkIncrementalCcacheAutotoolsPackage = import ./mk-incremental-ccache-autotools-package.nix {
-    inherit
-      inputs
-      lib
-      mkIncremental
       mkIncrementalAutotoolsPackage
       ccacheEnv
       resolveCache
@@ -61,7 +52,6 @@ in
     mkIncrementalRustPackage
     ccacheEnv
     mkIncrementalCcachePackage
-    mkIncrementalCcacheAutotoolsPackage
     mkIncrementalNixComponents
     ;
 }

@@ -7,14 +7,11 @@
 }:
 let
   inherit (incrementalLib)
-    mkIncrementalAutotoolsPackage
     mkIncrementalGoPackage
     mkIncrementalCcachePackage
-    mkIncrementalCcacheAutotoolsPackage
     mkIncrementalZigPackage
     mkIncrementalRustPackage
     mkIncrementalNixComponents
-    ccacheEnv
     ;
 in
 {
@@ -22,7 +19,7 @@ in
     inherit
       system
       pkgs
-      mkIncrementalCcacheAutotoolsPackage
+      mkIncrementalCcachePackage
       ;
   };
   golang = import ./golang.nix { inherit system pkgs mkIncrementalGoPackage; };
@@ -35,7 +32,6 @@ in
     lib
     system
     pkgs
-    mkIncrementalCcacheAutotoolsPackage
     mkIncrementalCcachePackage
     ;
 }
