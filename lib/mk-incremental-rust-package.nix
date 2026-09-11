@@ -2,7 +2,7 @@
   inputs,
   mkIncremental,
   mkIncrementalPackage,
-  resolveCache,
+  mkWithCache,
 }:
 let
   # buildRustPackage's cargoInstallHook looks for a fixed *relative*
@@ -12,7 +12,7 @@ let
   # preBuild` (right before `cargo build`) is still the right point
   # to do that, before anything reads the target dir.
   mkIncrementalRustPackage =
-    {
+    args@{
       name,
       system,
       pkgs,
@@ -51,20 +51,7 @@ let
       (old: {
         preBuild = old.preBuild + "ln -sfn ${inc.dir} target\n";
         passthru = old.passthru // {
-          withCache =
-            cacheFlake:
-            mkIncrementalRustPackage {
-              inherit
-                name
-                system
-                pkgs
-                drv
-                nuke
-                extraPostInstall
-                ;
-              keepIncremental = inc.keepIncremental;
-              cache = resolveCache cacheFlake;
-            };
+          withCache = mkWithCache mkIncrementalRustPackage args inc.keepIncremental;
         };
       });
 in

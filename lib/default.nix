@@ -3,13 +3,16 @@ let
   lib = inputs.nixpkgs.lib;
 
   resolveCache = import ./resolve-cache.nix;
+  mkWithCache = import ./mk-with-cache.nix { inherit resolveCache; };
+  mkAsCacheApp = import ./mk-as-cache-app.nix;
   mkIncremental = import ./mk-incremental.nix { inherit inputs lib; };
   mkIncrementalPackage = import ./mk-incremental-package.nix {
     inherit
       inputs
       lib
       mkIncremental
-      resolveCache
+      mkWithCache
+      mkAsCacheApp
       ;
   };
   mkIncrementalAutotoolsPackage = import ./mk-incremental-autotools-package.nix {
@@ -23,7 +26,7 @@ let
       inputs
       mkIncremental
       mkIncrementalPackage
-      resolveCache
+      mkWithCache
       ;
   };
   ccacheEnv = import ./ccache-env.nix;
@@ -34,8 +37,8 @@ let
       mkIncremental
       mkIncrementalPackage
       mkIncrementalAutotoolsPackage
+      mkWithCache
       ccacheEnv
-      resolveCache
       ;
   };
   mkIncrementalNixComponents = import ./mk-incremental-nix-components.nix {

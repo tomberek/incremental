@@ -4,8 +4,8 @@
   mkIncremental,
   mkIncrementalPackage,
   mkIncrementalAutotoolsPackage,
+  mkWithCache,
   ccacheEnv,
-  resolveCache,
 }:
 let
   # `drv` must already be built with ccacheStdenv (a plain
@@ -21,7 +21,7 @@ let
   # instead — whichever hook runs before the compiler does, since
   # that varies when there's no ./configure to anchor on.
   mkIncrementalCcachePackage =
-    {
+    args@{
       name,
       system,
       pkgs,
@@ -95,21 +95,7 @@ let
       # skip env.setup, which would silently drop
       # CCACHE_SLOPPINESS/debug-logging/report.
       passthru = old.passthru // {
-        withCache =
-          cacheFlake:
-          mkIncrementalCcachePackage {
-            inherit
-              name
-              system
-              pkgs
-              drv
-              phase
-              autotools
-              nuke
-              ;
-            keepIncremental = inc.keepIncremental;
-            cache = resolveCache cacheFlake;
-          };
+        withCache = mkWithCache mkIncrementalCcachePackage args inc.keepIncremental;
       };
     });
 in
