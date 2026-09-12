@@ -6,14 +6,14 @@
 }:
 let
   inherit (incrementalLib)
-    mkIncrementalPackage
+    mkIncremental
     mkIncrementalRustPackage
     ;
 in
 {
   c-self-test = import ./c-self-test.nix { inherit inputs system; };
   nuke-refs-self-test = import ./nuke-refs-self-test.nix {
-    inherit system pkgs mkIncrementalPackage;
+    inherit system pkgs mkIncremental;
   };
   rust-staleness-self-test = import ./rust-staleness-self-test.nix {
     inherit

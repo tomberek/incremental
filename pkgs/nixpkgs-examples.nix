@@ -123,7 +123,7 @@ let
         # the incremental and main outputs (confirmed: dropping this
         # reproduces "cycle detected ... in the references of output
         # 'bin' from output 'incremental'"). See
-        # lib/mk-incremental.nix's nukeScript.
+        # lib/mk-incremental-data.nix's nukeScript.
         nuke = true;
         drv = drv.override { stdenv = pkgs.ccacheStdenv; };
       };

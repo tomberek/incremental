@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds a third party's flake output restoring from a baseline build,
 # with no --override-input and no edits to the target's flake.nix —
-# just passthru.withCache, which every mkIncrementalPackage-based
+# just passthru.withCache, which every mkIncremental-based
 # derivation carries. Unlike --override-input cache (build-with-cache.sh,
 # build-input-diff.sh), baseline and target can be entirely different
 # flakes.

@@ -1,7 +1,7 @@
 {
   inputs,
+  mkIncrementalData,
   mkIncremental,
-  mkIncrementalPackage,
   mkWithCache,
 }:
 let
@@ -23,7 +23,7 @@ let
       extraPostInstall ? (_: ""),
     }:
     let
-      inc = mkIncremental {
+      inc = mkIncrementalData {
         inherit
           name
           system
@@ -34,7 +34,7 @@ let
         cacheVars = [ ];
       };
     in
-    (mkIncrementalPackage {
+    (mkIncremental {
       inherit
         name
         system

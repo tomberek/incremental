@@ -1,6 +1,6 @@
-{ inputs, mkIncrementalPackage }:
+{ inputs, mkIncremental }:
 
-# Go and Zig both just need mkIncrementalPackage with a fixed
+# Go and Zig both just need mkIncremental with a fixed
 # cacheVars/phase — shared shape for mk-incremental-go-package.nix and
 # mk-incremental-zig-package.nix.
 { cacheVars, phase }:
@@ -14,7 +14,7 @@
   keepIncremental ? !(cache ? packages),
   extraPostInstall ? (_: ""),
 }:
-mkIncrementalPackage {
+mkIncremental {
   inherit
     name
     system

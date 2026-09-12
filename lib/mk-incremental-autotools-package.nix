@@ -1,4 +1,4 @@
-{ inputs, mkIncrementalPackage }:
+{ inputs, mkIncremental }:
 
 # Adds autoconf's --cache-file so AC_CHECK_*/AC_TRY_* results survive
 # rebuilds. Never touches config.status/Makefile/config.h — those
@@ -14,7 +14,7 @@
   nuke ? cacheVars == [ ],
   extraPostInstall ? (_: ""),
 }:
-mkIncrementalPackage {
+mkIncremental {
   inherit
     name
     system

@@ -19,7 +19,7 @@
 # rather than closing over it — correct regardless of which
 # mkIncremental*Package wrapper actually defines `withCache` on the
 # target, so this only needs to exist once, here, and every wrapper
-# inherits it unchanged from mkIncrementalPackage's passthru.
+# inherits it unchanged from mkIncremental's passthru.
 let
   # path: needs a narHash to be treated as locked; getFlake otherwise
   # refuses it same as an unpinned rev.

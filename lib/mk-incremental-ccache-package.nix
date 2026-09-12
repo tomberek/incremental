@@ -1,8 +1,8 @@
 {
   inputs,
   lib,
+  mkIncrementalData,
   mkIncremental,
-  mkIncrementalPackage,
   mkIncrementalAutotoolsPackage,
   mkWithCache,
   ccacheEnv,
@@ -40,7 +40,7 @@ let
       drv.stdenv.cc.pname or "" == "ccache-links-wrapper"
     ) "mkIncrementalCcachePackage: `drv` (${name}) wasn't built with pkgs.ccacheStdenv.";
     let
-      inc = mkIncremental {
+      inc = mkIncrementalData {
         inherit
           name
           system
@@ -71,7 +71,7 @@ let
             extraPostInstall = _isCached: env.report;
           }
         else
-          mkIncrementalPackage {
+          mkIncremental {
             inherit
               name
               system
@@ -91,7 +91,7 @@ let
       # in ${phase} — so it has to run after, in one more layer.
       ${phase} = old.${phase} + env.setup;
       # Overrides the inherited passthru.withCache from
-      # mkIncrementalPackage/mkIncrementalAutotoolsPackage — those
+      # mkIncremental/mkIncrementalAutotoolsPackage — those
       # skip env.setup, which would silently drop
       # CCACHE_SLOPPINESS/debug-logging/report.
       passthru = old.passthru // {

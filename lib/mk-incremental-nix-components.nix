@@ -1,6 +1,6 @@
 {
   inputs,
-  mkIncremental,
+  mkIncrementalData,
   ccacheEnv,
 }:
 
@@ -53,7 +53,7 @@ scope.overrideAllMesonComponents (
   finalAttrs: prevAttrs:
   if prevAttrs.pname == target then
     let
-      inc = mkIncremental {
+      inc = mkIncrementalData {
         name = prevAttrs.pname;
         inherit system;
         cacheVars = [ "CCACHE_DIR" ];

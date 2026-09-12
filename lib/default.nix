@@ -5,27 +5,27 @@ let
   resolveCache = import ./resolve-cache.nix;
   mkWithCache = import ./mk-with-cache.nix { inherit resolveCache; };
   mkAsCacheApp = import ./mk-as-cache-app.nix;
-  mkIncremental = import ./mk-incremental.nix { inherit inputs lib; };
-  mkIncrementalPackage = import ./mk-incremental-package.nix {
+  mkIncrementalData = import ./mk-incremental-data.nix { inherit inputs lib; };
+  mkIncremental = import ./mk-incremental.nix {
     inherit
       inputs
       lib
-      mkIncremental
+      mkIncrementalData
       mkWithCache
       mkAsCacheApp
       ;
   };
   mkIncrementalAutotoolsPackage = import ./mk-incremental-autotools-package.nix {
-    inherit inputs mkIncrementalPackage;
+    inherit inputs mkIncremental;
   };
-  mkEcosystemPackage = import ./mk-ecosystem-package.nix { inherit inputs mkIncrementalPackage; };
+  mkEcosystemPackage = import ./mk-ecosystem-package.nix { inherit inputs mkIncremental; };
   mkIncrementalGoPackage = import ./mk-incremental-go-package.nix { inherit mkEcosystemPackage; };
   mkIncrementalZigPackage = import ./mk-incremental-zig-package.nix { inherit mkEcosystemPackage; };
   mkIncrementalRustPackage = import ./mk-incremental-rust-package.nix {
     inherit
       inputs
+      mkIncrementalData
       mkIncremental
-      mkIncrementalPackage
       mkWithCache
       ;
   };
@@ -34,21 +34,20 @@ let
     inherit
       inputs
       lib
+      mkIncrementalData
       mkIncremental
-      mkIncrementalPackage
       mkIncrementalAutotoolsPackage
       mkWithCache
       ccacheEnv
       ;
   };
   mkIncrementalNixComponents = import ./mk-incremental-nix-components.nix {
-    inherit inputs mkIncremental ccacheEnv;
+    inherit inputs mkIncrementalData ccacheEnv;
   };
 in
 {
   inherit
     mkIncremental
-    mkIncrementalPackage
     mkIncrementalAutotoolsPackage
     mkIncrementalGoPackage
     mkIncrementalZigPackage

@@ -10,7 +10,7 @@ ref you want).
 `cache` as an input — fine for packages that live in this repo, but it means
 a third party has to edit their own `flake.nix` to opt in.
 
-Every `mkIncrementalPackage`-based derivation also carries
+Every `mkIncremental`-based derivation also carries
 `passthru.withCache`, a plain function that takes a rev-pinned flake ref and
 returns the same package restoring from that build instead — no
 `--override-input`, no changes to the caller's `flake.nix`:
@@ -77,7 +77,7 @@ nix build --impure --expr \
    in pkg.withCache "<baseline-locked-flake-ref>"'
 ```
 
-Every `mkIncrementalPackage`-based derivation also carries
+Every `mkIncremental`-based derivation also carries
 `passthru.asCacheApp`: the same `withCache` call again, but with the
 baseline pre-filled to *this build's own already-fetched source*
 (`inputs.self`, pinned via its own content hash — works even from a
@@ -103,7 +103,7 @@ ccache specifically — a one-call-site wrapper that also handles
 "Adding a new ccache-cached package" below); pass `autotools = true`
 to additionally layer on `mkIncrementalAutotoolsPackage`'s
 `--cache-file`. For anything else, compose
-`mkIncrementalPackage`/`mkIncrementalAutotoolsPackage` directly.
+`mkIncremental`/`mkIncrementalAutotoolsPackage` directly.
 
 ## Examples in this repo
 
@@ -260,7 +260,7 @@ that a real code change only invalidates what it touches. Each
 `nixpkgs-python3-patched`, `nixpkgs-perl-patched`,
 `nixpkgs-llvm-patched`) applies one small, real upstream commit (see
 `patches/`) on top of the unpatched package. It shares the unpatched
-package's cache key (same `name` passed to `mkIncremental`), so
+package's cache key (same `name` passed to `mkIncrementalData`), so
 restoring from the unpatched build's cache and building the patched
 one exercises a genuine single-file diff instead of a no-op rebuild.
 Every one of these, at every scale tested, drops by roughly the

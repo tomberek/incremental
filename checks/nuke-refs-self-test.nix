@@ -1,10 +1,10 @@
 {
   system,
   pkgs,
-  mkIncrementalPackage,
+  mkIncremental,
 }:
 let
-  coldNukeTest = mkIncrementalPackage {
+  coldNukeTest = mkIncremental {
     name = "nuke-refs-self-test";
     inherit system pkgs;
     cacheVars = [ "REF_CACHE_DIR" ];
