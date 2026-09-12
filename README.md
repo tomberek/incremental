@@ -173,8 +173,8 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#hello-ccache
 ### Real nixpkgs packages (nixpkgs-jq, nixpkgs-redis, nixpkgs-tmux, nixpkgs-python3, nixpkgs-perl, nixpkgs-llvm)
 
 The above are toy examples; these check whether this is viable on
-something real. `nixpkgs-jq` wraps `pkgs.jq` (same
-`mkIncrementalAutotoolsPackage` pattern, `pkgs.jq.override { stdenv =
+something real. `nixpkgs-jq` wraps `pkgs.jq` (`mkIncrementalCcachePackage`
+with `autotools = true`, `pkgs.jq.override { stdenv =
 pkgs.ccacheStdenv; }`) — measured 38s cold → 22s restoring a
 same-source cache, 95% real ccache hit rate. `nixpkgs-redis` wraps
 `pkgs.redis`, which has no `./configure` at all (plain Makefile), so
