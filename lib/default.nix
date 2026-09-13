@@ -2,8 +2,7 @@
 let
   lib = inputs.nixpkgs.lib;
 
-  resolveCache = import ./resolve-cache.nix;
-  mkWithCache = import ./mk-with-cache.nix { inherit resolveCache; };
+  mkWithCache = import ./mk-with-cache.nix;
   mkAsCacheApp = import ./mk-as-cache-app.nix;
   mkIncrementalData = import ./mk-incremental-data.nix { inherit inputs lib; };
   mkIncremental = import ./mk-incremental.nix {

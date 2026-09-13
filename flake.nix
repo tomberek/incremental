@@ -66,7 +66,6 @@
         system: pkgs:
         import ./pkgs {
           inherit
-            inputs
             lib
             system
             pkgs
