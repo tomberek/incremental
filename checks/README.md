@@ -47,9 +47,9 @@ is 35+ minutes). On top of that, each package's `-patched` sibling
 on top of the unpatched build's cache and asserts a nonzero hit count
 restoring from it — same-source rebuilds only prove the restore/
 nuke-refs mechanism has no false negatives, not that a real source
-change only invalidates what it touches; see README, "Everything
-above restores from a same-source build" for what these confirm and
-the measured hit rates.
+change only invalidates what it touches; see README, "Real nixpkgs
+packages" (the "Proving incrementality under a real code change"
+part) for what these confirm and the measured hit rates.
 
 CI runs both this and `nix flake check` on every push.
 

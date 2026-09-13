@@ -1,18 +1,41 @@
 # Incremental builds
 
 Reuse outputs/caches from a previous build by overriding the `cache`
-flake input to an earlier checkout (or a previous build, or whatever
-ref you want).
+flake input to an earlier checkout (or a previous build, or any ref).
+Point a tool's own cache dir/file at a restored `incremental` output
+and let the tool decide what's still valid — this repo does the
+restoring, not the deciding.
+
+## Results
+
+- **LLVM** (`nixpkgs-llvm`, `pkgs.llvmPackages.llvm`, CMake/Ninja,
+  ~4200 translation units): 98% real ccache hits on a same-source
+  rebuild, `buildPhase` itself **35m17s → 1m20s (~26x)**.
+- **Real single-file patches, not just same-source reruns**: applying
+  one small, real upstream commit to `nixpkgs-llvm` and restoring from
+  the *unpatched* build's cache still hits 97.9% (4075/4159) —
+  dropping by exactly the one file the patch touched, even at LLVM's
+  scale. Same pattern confirmed on jq, redis, tmux, python3, perl.
+- **Found and fixed a real bug in NixOS/nix's own incremental build**:
+  `nix-incremental` (the full `nix` CLI) silently never restored
+  anything — two compounding key-mismatch bugs meant `--override-input
+  cache` had zero effect on its derivation. Fixed; now 96% real hits
+  (63/65) on a same-source rebuild. See "NixOS/nix itself" below.
+- **ccache isn't universal** — confirmed, not assumed, for four real
+  packages tried and dropped: `curl` (100% hits, 0 speedup — nothing
+  to compile), `openssh` (0% hits — bakes `$out` into `-D` flags),
+  `emacs` (1% hits — native-lisp `.eln` bypasses `$CC` via
+  `libgccjit`), `gcc` (0/0 *invocations* — bootstraps its own compiler
+  and never calls back through the ccache wrapper).
 
 ## Using this as a library from another flake
 
-`inputs.cache`/`--override-input` requires the flake being built to declare
-`cache` as an input — fine for packages that live in this repo, but it means
-a third party has to edit their own `flake.nix` to opt in.
-
-Every `mkIncremental`-based derivation also carries
-`passthru.withCache`, a plain function that takes a rev-pinned flake ref and
-returns the same package restoring from that build instead — no
+`inputs.cache`/`--override-input` requires the flake being built to
+declare `cache` as an input — fine for packages that live in this
+repo, but it means a third party has to edit their own `flake.nix` to
+opt in. Every `mkIncremental`-based derivation instead carries
+`passthru.withCache`, a plain function that takes a rev-pinned flake
+ref and returns the same package restoring from that build — no
 `--override-input`, no changes to the caller's `flake.nix`:
 
 ```nix
@@ -45,16 +68,14 @@ $ nix run github:tomberek/incremental#with-cache -- .
 
 `with-cache` takes the baseline first, then the target being built —
 "use this baseline, build this". Target defaults to `.#default`,
-matching `nix build`'s own default; give it explicitly for anything
-else:
+matching `nix build`'s own default:
 
 ```
 $ nix run github:tomberek/incremental#with-cache -- . ".#default"
 ```
 
 Baseline is auto-pinned to its locked rev via `nix flake metadata` if
-it isn't already, so a plain local path or branch name works too, not
-just an explicit `?rev=<sha>`:
+it isn't already, so a plain local path or branch name works too:
 
 ```
 $ nix run github:tomberek/incremental#with-cache -- \
@@ -64,11 +85,9 @@ $ nix run github:tomberek/incremental#with-cache -- \
 The target, by contrast, is built with `--impure` and can stay
 unlocked/dirty — it's the thing actually being built, not looked up
 inside `builtins.getFlake` for its own inputs. A bare name after `#`
-(like `default` above) expands to `packages.<current-system>.default`,
-matching `nix build`'s own shorthand; use a full dotted path (e.g.
-`checks.x86_64-linux.foo`) for anything else.
-
-The `with-cache` app is just this, spelled without `--impure --expr`:
+expands to `packages.<current-system>.default`; use a full dotted path
+(e.g. `checks.x86_64-linux.foo`) for anything else. The app is just
+this, spelled without `--impure --expr`:
 
 ```
 nix build --impure --expr \
@@ -78,312 +97,197 @@ nix build --impure --expr \
 ```
 
 Every `mkIncremental`-based derivation also carries
-`passthru.asCacheApp`: the same `withCache` call again, but with the
+`passthru.asCacheApp`: the same `withCache` call, but with the
 baseline pre-filled to *this build's own already-fetched source*
 (`inputs.self`, pinned via its own content hash — works even from a
-dirty tree, no commit required). Useful when the baseline is a flake
-you're already inside, so there's no flake ref to type out at all:
+dirty tree). Useful when there's no flake ref to type out at all:
 
 ```
 nix run <this-flake>#default.passthru.asCacheApp -- <target-flake-ref>#<name-or-attrpath>
 ```
 
-Note this has to be a plain derivation, not a `type = "app"` value —
-`nix run` only recognizes that shape under `apps.<system>.<name>`, not
-at an arbitrary attribute path. `writeShellApplication` (what builds
-it) sets `meta.mainProgram`, which is enough for `nix run` to find the
-right binary regardless.
+(Has to be a plain derivation, not `{ type = "app"; ... }` — `nix run`
+only recognizes that shape under `apps.<system>.<name>`, not at an
+arbitrary attrpath; `writeShellApplication`'s `meta.mainProgram` makes
+a plain derivation work anywhere instead.)
 
 `mkIncrementalGoPackage`, `mkIncrementalZigPackage`, and
 `mkIncrementalRustPackage` bake in the right `cacheVars`/`phase` for
-those ecosystems (see "Examples in this repo" below for why each
-needs what it needs). `mkIncrementalCcachePackage` does the same for
-ccache specifically — a one-call-site wrapper that also handles
-`ccacheEnv`'s setup/report shell and `passthru.withCache` (see
-"Adding a new ccache-cached package" below); pass `autotools = true`
-to additionally layer on `mkIncrementalAutotoolsPackage`'s
-`--cache-file`. For anything else, compose
+those ecosystems (see "Examples in this repo" for why each needs what
+it needs). `mkIncrementalCcachePackage` does the same for ccache — one
+call site handles `ccacheEnv`'s setup/report shell and
+`passthru.withCache`; pass `autotools = true` to also layer on
+autoconf's `--cache-file`. For anything else, compose
 `mkIncremental`/`mkIncrementalAutotoolsPackage` directly.
 
 ## Examples in this repo
 
-### Go
-
-Uses `mkIncrementalGoPackage`: `buildGoModule`'s own `configurePhase`
-sets `$GOCACHE` and only then runs `postConfigure`, so that's the
-hook `GOCACHE` gets pointed at the restored cache from.
+### Go / Zig / Rust
 
 ```
-$ nix build .#golang
-echo "// hi" >> golang/main.go
+$ nix build .#golang && echo "// hi" >> golang/main.go
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#golang
 ```
 
-### Zig
+Same shape for `.#zig` (`zig/main.zig`) and `.#rust`
+(`rust/src/main.rs`). Go's `buildGoModule` sets `$GOCACHE` in its own
+`configurePhase`, so the restore hooks `postConfigure`. Zig's
+`zigConfigurePhase` reassigns `ZIG_GLOBAL_CACHE_DIR` but never
+`ZIG_LOCAL_CACHE_DIR`, so both are exported earlier, in `preConfigure`.
 
-Uses `mkIncrementalZigPackage`: `zig.hook`'s `zigConfigurePhase`
-reassigns `ZIG_GLOBAL_CACHE_DIR` but never `ZIG_LOCAL_CACHE_DIR`, so
-both vars are exported earlier, in `preConfigure`.
-
-```
-$ nix build .#zig
-echo "// hi" >> zig/main.zig
-$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#zig
-```
-
-### Rust
-
-Uses `mkIncrementalRustPackage`, which restores Cargo's own build
-cache (`CARGO_TARGET_DIR`) — but pointing that at a restored dir isn't
-enough on its own. `buildRustPackage`'s `cargoInstallHook` looks for a
+Rust needs more: `buildRustPackage`'s `cargoInstallHook` looks for a
 fixed *relative* path (`target/<subdir>/<buildType>`), not
-`$CARGO_TARGET_DIR`, so the wrapper symlinks `./target` to the
-restored dir in `preBuild` instead of exporting an env var.
+`$CARGO_TARGET_DIR`, so `mkIncrementalRustPackage` symlinks `./target`
+to the restored dir instead of exporting an env var. More importantly,
+Cargo's fingerprinting is mtime-based and Nix normalizes every
+unpacked file's mtime to the epoch — a restored `target/` would look
+"fresh" regardless of what actually changed. The fix is Cargo's
+`-Zchecksum-freshness` (unlocked on stable via `RUSTC_BOOTSTRAP=1`),
+switching it to content-hash staleness — the same fix ccache needed,
+for the same reason. `rust-staleness-self-test` (see
+`checks/README.md`) is what would catch a regression here: it
+restores a cache built from *different* source and asserts the binary
+isn't served stale.
 
-More importantly: Cargo's default fingerprinting is mtime-based, and
-Nix normalizes every unpacked source file's mtime to the epoch, so a
-restored `target/` looks "fresh" to Cargo regardless of what actually
-changed — the same failure mode this repo already avoids for
-Autotools by not caching `config.status`. The fix here is Cargo's
-`-Zchecksum-freshness` (unstable, unlocked on stable via
-`RUSTC_BOOTSTRAP=1`), which switches Cargo to content-hash-based
-staleness detection, the same fix ccache needed for the same reason.
-`mkIncrementalRustPackage`'s example sets both; a `buildRustPackage`
-without them would silently serve stale binaries when restoring from
-a cache built from different source — the `rust-staleness-self-test`
-check catches exactly this.
-
-```
-$ nix build .#rust
-echo '// hi' >> rust/src/main.rs
-$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#rust
-```
-
-### ccache (hello-ccache)
+### ccache (hello-ccache, c)
 
 ```
 $ nix build .#hello-ccache
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#hello-ccache
 ```
 
-`hello-ccache` also caches autoconf's check results via
-`--cache-file`: `nix build -L` shows `configure: loading cache
-.../config.cache`, plus a ccache hit rate on rebuild.
-
-### Real nixpkgs packages (nixpkgs-jq, nixpkgs-redis, nixpkgs-tmux, nixpkgs-python3, nixpkgs-perl, nixpkgs-llvm)
-
-The above are toy examples; these check whether this is viable on
-something real. `nixpkgs-jq` wraps `pkgs.jq` (`mkIncrementalCcachePackage`
-with `autotools = true`, `pkgs.jq.override { stdenv =
-pkgs.ccacheStdenv; }`) — measured 38s cold → 22s restoring a
-same-source cache, 95% real ccache hit rate. `nixpkgs-redis` wraps
-`pkgs.redis`, which has no `./configure` at all (plain Makefile), so
-it's built with `mkIncrementalCcachePackage` directly instead
-(ccache-only, no `--cache-file` claim) — measured 4m46s cold → 42s,
-96% real ccache hit rate. `nixpkgs-tmux` wraps `pkgs.tmux` — 100%
-real ccache hit rate, but only ~1.6x wall-clock (2m → 1m13s): most of
-tmux's build time is autoconf's own `./configure` checks plus a
-single-threaded final link, neither of which ccache touches. A useful
-reminder that "100% cache hits" doesn't automatically mean
-"proportionally faster" — it depends on how much of the wall-clock is
-actually compilation.
-
-`nixpkgs-python3` wraps `pkgs.python3` — also ccache-only, but for a
-different reason than redis: python3 *does* have a real `./configure`,
-but its nixpkgs derivation restricts `outputChecks.out` from
-referencing `openssl-dev`, and a composed `incremental` output
-inherits that same restriction. `--with-openssl=<path>-dev` is a
-literal `configureFlags` entry, so `config.cache` would legitimately
-record that exact path — tripping the disallowed-reference check at
-build time. Dropping `--cache-file` avoids *that* conflict, but at
-python3's scale (hundreds of autoconf `conftest` probes)
-`ccacheEnv`'s own `CCACHE_DEBUG=1` writes every probe's full compile
-command line — including the same `-I<path>/include` — verbatim to
-`$incremental/debug-logs`, and those references reproducibly survived
-a `nuke-refs` pass at this scale even though the identical mechanism
-works on a smaller synthetic test. Disabling debug logging for this
-package (`unset CCACHE_DEBUG CCACHE_DEBUGDIR` right after
-`env.setup`) avoids needing to scrub those files at all — confirmed
-fix, reproduced twice: 99% real ccache hit rate, no
-disallowed-reference error, ~1.2x wall-clock (4m16s → 3m24s) since
-`postInstall` also runs `python -m compileall` over the entire stdlib
-three times (plain/`-O`/`-OO`), pure Python bytecode compilation
-ccache never sees, on every build regardless of what changed.
-
-`nixpkgs-perl` wraps `pkgs.perl` — ccache-only like redis, since
-perl's own `Configure` script isn't autoconf-based at all (no
-`autoreconf-hook`, no `configurePhase`) and wouldn't understand
-`--cache-file`. Its `configureFlags` includes
-`-Dprefix=<placeholder>`, which looked like it might repeat openssh's
-`$out`-in-flags problem — but that flag only feeds `Configure`'s own
-bookkeeping (`Config.pm` generation), never an actual C compile
-command line, so it turned out harmless: confirmed by measuring the
-real ccache hit rate rather than guessing from the flag alone. 99%
-real hits, ~1.6x wall-clock (2m57s → 1m48s).
-
-`nixpkgs-llvm` wraps `pkgs.llvmPackages.llvm` — the "go bigger" test:
-CMake/Ninja, no `./configure` at all, so ccache-only like redis/perl.
-98% real ccache hits (4076/4159); `buildPhase` itself drops from
-35m17s to 1m20s (~26x) restoring a same-source cache. Overall
-wall-clock only improves ~4.5x (10816s → 2377s) because `checkPhase`
-runs LLVM's own `lit`-based test suite on every build regardless of
-caching (432s–550s, ccache never touches it) — the same "high hit
-rate isn't proportional wall-clock" lesson as `tmux`, just at LLVM's
-scale. `nuke-refs` also has meaningfully more work here than at
-python3's scale (thousands of ccache debug-log files vs. hundreds)
-and still completed cleanly — the python3 debug-log leak looks like
-it was specific to that build, not something that gets worse with
-scale on its own. **Not wired into `verify-override-input.sh`/CI**:
-a cold build takes 35+ minutes on 22 local cores, and CI runners have
-far fewer — verified locally instead of on every push/PR.
-
-```
-$ nix build .#nixpkgs-jq
-$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-jq
-$ nix build .#nixpkgs-redis
-$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-redis
-$ nix build .#nixpkgs-tmux
-$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-tmux
-$ nix build .#nixpkgs-python3
-$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-python3
-$ nix build .#nixpkgs-perl
-$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-perl
-$ nix build .#nixpkgs-llvm
-$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-llvm
-```
-
-Everything above restores from a same-source build — it proves the
-restore/`nuke-refs` mechanism doesn't have false negatives, but not
-that a real code change only invalidates what it touches. Each
-`nixpkgs-*-patched` variant (`nixpkgs-jq-patched`,
-`nixpkgs-redis-patched`, `nixpkgs-tmux-patched`,
-`nixpkgs-python3-patched`, `nixpkgs-perl-patched`,
-`nixpkgs-llvm-patched`) applies one small, real upstream commit (see
-`patches/`) on top of the unpatched package. It shares the unpatched
-package's cache key (same `name` passed to `mkIncrementalData`), so
-restoring from the unpatched build's cache and building the patched
-one exercises a genuine single-file diff instead of a no-op rebuild.
-Every one of these, at every scale tested, drops by roughly the
-number of files the patch actually touches and no more — e.g.
-`nixpkgs-jq-patched` (one line in `src/main.c`) hits 23/24 (95%,
-same as `nixpkgs-jq`'s unpatched 95%, minus the one file);
-`nixpkgs-llvm-patched` (one function in
-`llvm/lib/Analysis/MemoryDependenceAnalysis.cpp`) hits 4075/4159
-(97.9%, vs. `nixpkgs-llvm`'s unpatched 98.0%) even at LLVM's ~4200-TU
-scale. `nixpkgs-llvm-patched` is excluded from CI for the same reason
-as `nixpkgs-llvm` above.
-
-```
-$ nix build .#nixpkgs-jq
-$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-jq-patched
-```
-
-`nixpkgs-jq-patched` is `pkgs.jq` plus one real upstream patch (see
-`patches/`) applied via `overrideAttrs` — the point isn't the
-`nix build` invocation (identical to any other package), it's that
-`.#nixpkgs-jq-patched` shares `nixpkgs-jq`'s cache key, so the second
-build above restores real, unmodified ccache state and only
-recompiles the one file the patch touches.
-
-Not every C package benefits the same way — tried and dropped as
-examples for instructive reasons:
-
-- `curl` hits 100% in ccache but shows no real wall-clock speedup —
-  its build time is dominated by man-page rendering/install steps,
-  not compilation, so there's nothing for ccache to save.
-- `openssh` bakes its own `$out` into compile-time `-D` flags
-  (`-D_PATH_SSH_PROGRAM=...` and similar `_PATH_*` macros). Since
-  `$out` is a different store path on every build with a different
-  `cache` input, every compile command differs between builds
-  regardless of source changes — ccache's key ends up unique per
-  build, and the real hit rate is 0%.
-- `nginx`'s `./configure` isn't autoconf-based and doesn't recognize
-  `--cache-file` at all (`error: invalid option
-  "--cache-file=..."`), so it's incompatible with
-  `mkIncrementalAutotoolsPackage` outright.
-- `emacs` (`--with-native-compilation`) was the "go bigger" test —
-  ~16 minutes either way, cold or warm, 1% real ccache hit rate
-  (measured 3/155). Native-lisp `.eln` compilation runs through
-  `libgccjit` in-process during Emacs's own "dump" step, never
-  through `$CC`/ccache — a real, structural blind spot for a
-  C-compiler-wrapping cache, not a bug here. The C sources that *are*
-  visible to ccache also spend a lot of time on `autoconf_test`
-  overhead from emacs's unusually large gnulib-based `./configure`.
-- `gcc` (`pkgs.gcc.cc` under `ccacheStdenv`) hits the same blind spot
-  as emacs, just with itself instead of Lisp: 0/0 ccache invocations
-  on a warm rebuild (confirmed by grepping the build log for the
-  ccache binary — it never runs). GCC bootstraps its own compiler
-  (`xgcc`) once using the host `$CC`, then uses that freshly-built
-  `xgcc` — not the ccache-wrapped host compiler — for the ~2500
-  compiles of libgcc/libstdc++/libatomic/libsanitizer/etc. that make
-  up the rest of the build (cold: 732s; warm: 932s, actually slower
-  since ccache adds overhead with zero payoff). Wrapping `xgcc` itself
-  post-bootstrap would need a different mechanism than the
-  `ccacheStdenv` override this repo uses.
-
-### Adding a new ccache-cached package
-
-`mkIncrementalCcachePackage` is the one-call-site way to add ccache
-caching to a C/C++ package. `c/` is a minimal worked example:
+`mkIncrementalCcachePackage` is the one-call-site way to add ccache to
+a C/C++ package — `c/` is the minimal worked example (no build
+system, just `$CC` calls); `hello-ccache` is the `autotools = true`
+worked example, which also caches autoconf's check results via
+`--cache-file` (`nix build -L` shows `configure: loading cache
+.../config.cache`):
 
 ```nix
 c = mkIncrementalCcachePackage {
   name = "c";
   inherit system pkgs;
   phase = "postPatch"; # whichever phase runs before your compiler does
-  drv = pkgs.ccacheStdenv.mkDerivation {
-    name = "c";
-    src = pkgs.lib.cleanSource ./c;
-    buildPhase = "$CC -c a.c -o a.o && ...";
-    installPhase = "mkdir -p $out/bin && cp c $out/bin/";
-  };
+  drv = pkgs.ccacheStdenv.mkDerivation { ... };
 };
-```
 
-```
-$ nix build .#c
-$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#c
-```
-
-- `drv` must already be built with `ccacheStdenv` —
-  `pkgs.ccacheStdenv.mkDerivation { ... }`, or `.override { stdenv =
-  pkgs.ccacheStdenv; }` on an existing `callPackage`-based one.
-  Swapping `stdenv` after construction doesn't work on a plain
-  `stdenv.mkDerivation` result — it has no `.override`. An eval-time
-  assert catches this.
-- `phase` must be a hook that still runs given whatever the package
-  skips — e.g. `preConfigure` lives inside `configurePhase`, so
-  `dontConfigure = true` skips both. `postPatch` always runs.
-
-If the package also has a real autoconf `./configure`, pass
-`autotools = true` to layer ccache on top of
-`mkIncrementalAutotoolsPackage`'s `--cache-file` instead — `phase` is
-then fixed to `postPatch` (dropped from the call, not just defaulted:
-`--cache-file`'s own restore has to already be live at that point)
-and `cacheVars` stays `CCACHE_DIR` either way. `hello-ccache` is the
-worked example:
-
-```nix
 hello-ccache = mkIncrementalCcachePackage {
   name = "hello-ccache";
   inherit system pkgs;
-  autotools = true;
+  autotools = true; # fixes phase to postPatch, adds --cache-file
   drv = pkgs.hello.override { stdenv = pkgs.ccacheStdenv; };
 };
 ```
 
-`nuke` defaults to `false` here (small builds like `hello` don't pick
-up real store-path references in ccache's own manifest); the
-nixpkgs-jq-style examples above pass `nuke = true` explicitly once a
-build is big enough that they do — see `pkgs/nixpkgs-examples.nix`.
+Two things that bite: `drv` must already be built with `ccacheStdenv`
+(`.override { stdenv = pkgs.ccacheStdenv; }` on an existing package —
+swapping `stdenv` after construction doesn't work on a plain
+`stdenv.mkDerivation` result, and an eval-time assert catches this).
+`phase` must be a hook that still runs given whatever the package
+skips (`postPatch` always does; `preConfigure` doesn't if
+`dontConfigure = true`). `nuke` (nuke real store-path references out
+of ccache's own manifest before it lands in `incremental`) defaults
+to `false` — fine for a build this small, but the real nixpkgs
+examples below pass `nuke = true` explicitly once a build is big
+enough to pick up real references (see `pkgs/nixpkgs-examples.nix`).
+
+### Real nixpkgs packages
+
+The above are toy examples; these check viability on something real —
+every number below is a measured same-source cold→warm rebuild, not
+an estimate:
+
+| package | mechanism | hit rate | speedup |
+|---|---|---|---|
+| `nixpkgs-jq` | autotools + ccache | 95% | 38s → 22s (~1.7x) |
+| `nixpkgs-redis` | ccache only (no `./configure`) | 96% | 4m46s → 42s (~6.8x) |
+| `nixpkgs-tmux` | autotools + ccache | 100% | 2m → 1m13s (~1.6x) |
+| `nixpkgs-python3` | ccache only, debug logging disabled | 99% | 4m16s → 3m24s (~1.2x) |
+| `nixpkgs-perl` | ccache only (`Configure`, not autoconf) | 99% | 2m57s → 1m48s (~1.6x) |
+| `nixpkgs-llvm` | ccache only (CMake/Ninja) | 98% | buildPhase 35m17s → 1m20s (~26x); overall 10816s → 2377s (~4.5x) |
+
+```
+$ nix build .#nixpkgs-jq
+$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-jq
+```
+
+(same for `nixpkgs-redis`/`nixpkgs-tmux`/`nixpkgs-python3`/
+`nixpkgs-perl`/`nixpkgs-llvm`; `nixpkgs-llvm` isn't in CI — a cold
+build takes 35+ minutes on 22 local cores.)
+
+`tmux` hits 100% but only gets ~1.6x, and `llvm`'s `buildPhase` speedup
+(~26x) doesn't carry through to its overall wall-clock (~4.5x) —
+`checkPhase` runs LLVM's own `lit` test suite every build regardless
+of caching (432–550s ccache never touches). **100% cache hits doesn't
+mean proportionally faster** — it means whatever ccache *can* see was
+fully reused; how much of the wall-clock that actually is depends on
+the package. `python3` hits the same pattern for a different reason:
+`postInstall` runs `python -m compileall` over the entire stdlib three
+times, pure bytecode compilation ccache never sees.
+
+`redis`/`perl`/`llvm` are ccache-only (no `--cache-file`) because none
+has a real autoconf `./configure`: redis is a plain Makefile, perl's
+own `Configure` isn't autoconf, llvm is CMake/Ninja. `python3` *does*
+have a real `./configure`, but its nixpkgs derivation restricts
+`outputChecks.out` from referencing `openssl-dev`; a composed
+`incremental` output inherits that same restriction, and
+`--with-openssl=<path>-dev` in `configureFlags` means `config.cache`
+would legitimately record that path, tripping the check. Dropping
+`--cache-file` avoids that — but at python3's scale, `ccacheEnv`'s own
+`CCACHE_DEBUG=1` debug logs leaked the same disallowed path through a
+different route (hundreds of autoconf `conftest` probes, each logging
+its full compile command line); disabling debug logging for this one
+package sidesteps needing to scrub those files at all.
+
+**Proving incrementality under a real code change, not just a
+same-source rerun:** every `nixpkgs-*-patched` variant applies one
+small, real upstream commit (see `patches/`) on top of the unpatched
+package, sharing its cache key. Restoring from the *unpatched* build's
+cache and building the *patched* one only recompiles what the patch
+touched — confirmed at every scale tested, down to the exact file
+count:
+
+```
+$ nix build .#nixpkgs-jq
+$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-jq-patched
+```
+
+| patched package | patch | hits | vs. unpatched |
+|---|---|---|---|
+| `nixpkgs-jq-patched` | one line, `src/main.c` | 23/24 (95%) | same 95% |
+| `nixpkgs-llvm-patched` | one function, `MemoryDependenceAnalysis.cpp` | 4075/4159 (97.9%) | 98.0% unpatched, ~4200 TUs |
+
+Not every C package benefits — tried and dropped, each confirmed by
+measurement, not guessed from reading the build:
+
+- **`curl`**: 100% ccache hits, 0% real speedup — build time is
+  man-page rendering, not compilation.
+- **`openssh`**: 0% hits — bakes its own `$out` into `-D` flags
+  (`-D_PATH_SSH_PROGRAM=...`), so every compile command differs
+  between builds regardless of source changes.
+- **`nginx`**: incompatible outright — its `./configure` isn't
+  autoconf and rejects `--cache-file`.
+- **`emacs`**: 1% hits (3/155) — native-lisp `.eln` compiles through
+  `libgccjit` in-process during Emacs's own "dump" step, never through
+  `$CC`. A real structural blind spot for a compiler-wrapping cache,
+  not a bug here.
+- **`gcc`**: 0/0 ccache *invocations* — the same blind spot as emacs,
+  just compiling itself instead of Lisp. GCC bootstraps its own
+  compiler (`xgcc`) once with the host `$CC`, then uses that
+  self-built `xgcc` — never the ccache wrapper — for the ~2500
+  compiles that make up the rest of the build. Warm was *slower* than
+  cold (932s vs. 732s): ccache overhead with zero payoff.
 
 ### NixOS/nix itself (nix-incremental)
 
 `github:NixOS/nix`'s flake splits `nix` into ~14 Meson/Ninja component
-derivations (`nix-util`, `nix-store`, `nix-expr`, ...) sharing a scope
-with `overrideAllMesonComponents`, an overlay applied to every
-component transitively — building `nix-cli` applies it to everything
-underneath too.
+derivations sharing a scope via `overrideAllMesonComponents` — an
+overlay applied to every component, so building the full CLI applies
+it underneath too. Only the named target gets a cache-varying restore
+script; every dependency gets a fixed one and falls back to plain
+store substitution (a shared dependency's script varying with caching
+state would give it a different derivation per `cache` input,
+poisoning every dependent's `-isystem` flag into a permanent miss).
 
 ```
 $ nix build .#nix-fetchers
@@ -391,62 +295,37 @@ $ nix build .#nix-fetchers
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nix-fetchers
 ```
 
-Each component (`nix-util`, `nix-store`, `nix-fetchers`, `nix-expr`,
-`nix-flake`, `nix-main`, `nix-cmd`, and their `-c` variants) is its own
-package; `nix-incremental` builds the full CLI (`nix-cli`
-internally — its own Meson `pname` is `nix`, not `nix-cli`) and gets
-the same treatment: 96% real ccache hits (63/65) on a same-source
-rebuild. Getting this wrong is silent, not an error — an earlier
-version of this wrapper matched the override callback on `target`
-directly and used it as the cache lookup key too, so `nix-incremental`
-built with the exact same (wrong) `target = "nix-cli"` string used for
-both, matching nothing (`pname` is `"nix"`) and restoring from
-`"empty"` regardless of `--override-input cache`. Passing the real
-`pname` as `target` and the flake attribute name as a separate `name`
-(the cache lookup/report key) fixed both.
+`nix-incremental` builds the full CLI the same way — and until
+recently, silently didn't. Two compounding bugs: the override matched
+on the component's own Meson `pname`, but `nix-cli`'s real `pname` is
+`"nix"`, not `"nix-cli"` — the match failed, and the *cache lookup*
+used the same wrong string as its key, so it silently restored from
+`"empty"` every time regardless of `--override-input cache`. No error,
+no warning — just a derivation that never changed shape whether or
+not the override was passed. Confirmed via `nix eval`: the
+`.incremental` output path was byte-identical with and without the
+override, before the fix. Fixed by separating `target` (matches the
+real `pname`) from `name` (the cache lookup/report key, defaults to
+`target` but overridable) — `nix-incremental` now hits **96% (63/65)**
+on a same-source rebuild.
 
-**Want every component to individually benefit from caching, not just
-whichever one you name?** Build `nix-all-components` instead of
-`nix-incremental` — it's every component built as its own top-level
-target (via `symlinkJoin`), so each keeps its own cache-varying
-restore script and reports its own hit rate, instead of `nix-cli`
-pulling them in as fixed-script dependencies:
+**Want every component to individually benefit, not just the one you
+name?** Build `nix-all-components` instead — every component as its
+own top-level target, each with its own restore script and hit rate:
 
 ```
 $ nix build .#nix-all-components
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nix-all-components
 ```
 
-**Only the component you're building gets a cache-varying restore
-script — every dependency gets a fixed one.** `cache` is a full nested
-evaluation of this same flake with its own `cache` input. If a shared
-dependency like `nix-store` had a script whose text varied with
-caching state, it would compile to a different derivation (different
-`dev` output path) inside `cache`'s tree vs. the target's tree —
-dependents embed that path in every `-I`/`-isystem` flag, so their
-ccache manifest key would then differ between builds and every file
-would report a miss regardless of actual source changes. Tradeoff:
-only the actively-built component gets cross-build ccache hits; its
-dependencies fall back to Nix's own store substitution.
-
-The ccache summary prints the top miss reasons from the debug log
-under `$incremental/debug-logs`:
+The ccache summary prints top miss reasons from the debug log:
 
 ```
 ccache[nix-fetchers]: 18/18 hits (100%)
 ```
 
-or, on a miss:
-
-```
-ccache[nix-fetchers]: 0/18 hits (0%)
-ccache[nix-fetchers]: miss reasons (top):
-ccache[nix-fetchers]:   18 cache_miss
-```
-
-**`--override-input nix <path>` needs `cache/nix` overridden too.**
-`cache` resolves its own `nix` input from `flake.lock` independently —
-overriding the top-level `nix` alone doesn't affect `cache`'s copy:
+**`--override-input nix <path>` needs `cache/nix` overridden too** —
+`cache` resolves its own `nix` input from `flake.lock` independently:
 
 ```
 nix build .#nix-fetchers \
@@ -456,10 +335,11 @@ nix build .#nix-fetchers \
   -L
 ```
 
-`scripts/build-with-cache.sh` automates that pairing for the common
-case of building a "base" ref first and a "target" ref against it —
-e.g. seeding the cache from `master` and building a PR branch against
-it, so the PR build only recompiles what the PR actually touches:
+`scripts/build-with-cache.sh` automates that pairing for comparing a
+base ref against a target ref (e.g. seeding from `master`, building a
+PR branch against it — mirrors every `--override-input` given to the
+base build onto `cache/<name>` for the target, not a `follows`, since
+base and target are supposed to use *different* revisions):
 
 ```
 scripts/build-with-cache.sh \
@@ -468,85 +348,51 @@ scripts/build-with-cache.sh \
   ".#nix-incremental" --override-input nix github:NixOS/nix/pull/16428/merge
 ```
 
-It mirrors every `--override-input` given to the base build onto
-`cache/<name>` for the target build, so `cache` is evaluated with the
-exact inputs base was actually built with — not a `follows`, which
-would be wrong here: base and target are supposed to use different
-`nix` revisions, and a `follows` would silently force them to match.
-
-Also runnable without a checkout, as `apps.<system>.build-with-cache`:
-
-```
-nix run github:tomberek/incremental#build-with-cache -- \
-  ".#nix-incremental" --override-input nix github:NixOS/nix/master \
-  -- \
-  ".#nix-incremental" --override-input nix github:NixOS/nix/pull/16428/merge
-```
-
-For the common case of comparing two revs of *one* input (this is
-that same pairing, just for a single named input instead of
-mirroring an arbitrary list of overrides), `build-input-diff.sh` /
-`apps.<system>.build-input-diff` is shorter:
+Also runnable without a checkout (`apps.<system>.build-with-cache`),
+and `build-input-diff.sh`/`apps.<system>.build-input-diff` is the
+shorter form for comparing two revs of one input:
 
 ```
 nix run github:tomberek/incremental#build-input-diff -- \
   .#nix-all-components nix github:NixOS/nix/master github:NixOS/nix/pull/16428/merge
 ```
 
-Measured on `nix-util`/`nix-store` (cold vs. a same-source rebuild
-restoring 100%-hit ccache state): 44s → 17s and 101s → 36s
-respectively — roughly a 2.6-2.8x speedup. A real PR pays full price
-for whatever it actually touches; everything else gets this speedup.
-Components that `#include` a changed component's headers (e.g.
-`nix-expr` including `nix-fetchers`) recompile too, since their
-`-isystem` flag now points at a different (also-changed) `-dev`
-store path — a real cost, not a cache misconfiguration.
+Measured on `nix-util`/`nix-store`: 44s → 17s and 101s → 36s
+(~2.6–2.8x) restoring a 100%-hit cache. A real PR pays full price for
+whatever it actually touches; components that `#include` a changed
+component's headers recompile too — a real cost, not a
+misconfiguration.
 
-Three adjustments from NixOS/nix's own defaults:
-
-- `withUnityBuild = false` — Meson's unity-build feature merges many
-  `.cc` files into one translation unit, coarsening ccache's per-file
-  hit granularity to uselessness.
-- `withAWS = false` on `nix-store` — its `aws-crt-cpp` dependency
-  resolves via CMake, whose compiler-detection breaks under a fully
-  swapped `ccacheStdenv`.
-- `CCACHE_SLOPPINESS=random_seed,include_file_mtime,include_file_ctime`
-  — `random_seed` is the same `-frandom-seed` fix `hello-ccache`
-  applies. `include_file_mtime`/`include_file_ctime` disable ccache's
-  "recently modified" safety check on headers, since every dependency
-  is materialized fresh into the sandbox every build.
+Three adjustments from NixOS/nix's own defaults: `withUnityBuild =
+false` (unity builds merge many `.cc` files into one translation
+unit, wrecking per-file hit granularity), `withAWS = false` on
+`nix-store` (its CMake-resolved `aws-crt-cpp` dependency breaks under
+a swapped `ccacheStdenv`), and
+`CCACHE_SLOPPINESS=random_seed,include_file_mtime,include_file_ctime`
+(`random_seed` is the same `-frandom-seed` fix `hello-ccache` needs;
+the other two disable ccache's "recently modified" header check,
+since every dependency is materialized fresh into the sandbox).
 
 ## What's safe to cache
 
-Each package points a tool's own cache dir (or file) at the restored
-`incremental` output and lets the tool decide what to reuse. Safe
-when these caches are content-addressed: ccache keys on preprocessed
-source + flags, Go/Zig's build caches similarly, and autoconf's
-`config.cache` stores check results ("does `malloc` exist? yes")
-with no path baked in.
-
-Not every tool defaults to this. Cargo's own build cache is
-mtime-based, not content-addressed, and needs `-Zchecksum-freshness`
-turned on explicitly before it's safe to restore this way — see
-"Rust" above and `rust-staleness-self-test` in "Checks" below.
+Content-addressed caches are safe to restore this way: ccache keys on
+preprocessed source + flags, Go/Zig's build caches similarly,
+autoconf's `config.cache` stores check results with no path baked in.
+Cargo's isn't (mtime-based) — see Rust above.
 
 Caching `./configure`'s actual *output* — `config.status`, the
 generated `Makefile`, `config.h` — isn't safe and isn't done here.
-Autotools bakes the configure-time prefix into `config.status`/
-`Makefile` as text, and for gettext-style builds directly into the
-compiled binary (`-DLOCALEDIR=...`). Restoring a cached `Makefile`
-against a new `$out` breaks the install or ships a binary pointing at
-a stale store path.
-
-Tried and dropped: relocating a fixed placeholder prefix by
-byte-preserving find/replace (breaks on LTO sections and libtool
-symlinks; also Nix normalizes unpacked-source mtimes, so `make` can
-lose its own staleness check and silently keep a stale object), and
-caching only autoreconf's output (misses `m4_esyscmd`-derived version
-strings, e.g. gnulib's `git-version-gen`).
-
-For compile-level caching beyond `config.cache`, use `ccacheStdenv`
-rather than trying to skip `./configure`.
+Autotools bakes the configure-time prefix into those as text (and for
+gettext-style builds, directly into the compiled binary via
+`-DLOCALEDIR=...`); restoring a cached `Makefile` against a new `$out`
+breaks the install or ships a binary pointing at a stale store path.
+Tried and dropped: byte-preserving find/replace on a placeholder
+prefix (breaks LTO sections and libtool symlinks; also loses Make's
+own mtime-based staleness check since Nix normalizes source mtimes),
+and caching only autoreconf's output (misses `m4_esyscmd`-derived
+version strings like gnulib's `git-version-gen`). For compile-level
+caching beyond `config.cache`, use `ccacheStdenv` instead of trying to
+skip `./configure`.
 
 See `checks/README.md` for what `nix flake check` and
 `scripts/verify-override-input.sh` actually test.
@@ -556,10 +402,9 @@ See `checks/README.md` for what `nix flake check` and
 A plain build always produces an `incremental` output — what a later
 build restores from. A build that's itself restoring from an injected
 `cache` defaults to not producing its own, to avoid leaving a
-redundant cache blob on top of the one just read.
-
-Pass `keepIncremental = true` to opt back in (e.g. to keep chaining
-further). `hello-ccache` and every `nix-*` component always keep it —
+redundant cache blob on top of the one just read. Pass
+`keepIncremental = true` to opt back in (e.g. to keep chaining
+further); `hello-ccache` and every `nix-*` component always keep it —
 `hello-ccache` because `--cache-file` needs a real declared output to
-resolve; `nix-*` components because that's what makes the per-target
-caching above work at all.
+resolve, `nix-*` components because that's what makes per-target
+caching work at all.
