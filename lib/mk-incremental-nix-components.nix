@@ -23,7 +23,24 @@
 # actual source changes. Tradeoff: only the component you're
 # building gets cross-build ccache hits; dependencies fall back
 # to plain store substitution.
-{ system, target }:
+#
+# `target` matches the component's own Meson `pname` — that's what
+# `overrideAllMesonComponents`'s callback sees on `prevAttrs`. `name`
+# is the cache lookup/report key and defaults to `target`, but the
+# two aren't always the same: nix-cli's own pname is "nix" (not
+# "nix-cli"), while this repo exposes it as the `nix-incremental`
+# flake output — passing name = "nix-incremental" there keys the
+# restore lookup (cache.packages.${system}.${name}.incremental) under
+# the name a real cache actually has it at. Getting this wrong
+# doesn't error — it silently restores from "empty" every time,
+# regardless of --override-input cache (confirmed: nix-incremental's
+# own derivation was byte-identical with and without the override
+# until this was fixed).
+{
+  system,
+  target,
+  name ? target,
+}:
 let
   pkgs = inputs.nix.inputs.nixpkgs.legacyPackages.${system};
   scope =
@@ -54,15 +71,14 @@ scope.overrideAllMesonComponents (
   if prevAttrs.pname == target then
     let
       inc = mkIncrementalData {
-        name = prevAttrs.pname;
-        inherit system;
+        inherit name system;
         cacheVars = [ "CCACHE_DIR" ];
         nuke = false;
         keepIncremental = true;
       };
       env = ccacheEnv {
         inherit pkgs;
-        pname = prevAttrs.pname;
+        pname = name;
         dir = inc.dir;
         debugDir = inc.debugDir;
       };

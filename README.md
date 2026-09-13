@@ -393,7 +393,17 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nix-fetchers
 
 Each component (`nix-util`, `nix-store`, `nix-fetchers`, `nix-expr`,
 `nix-flake`, `nix-main`, `nix-cmd`, and their `-c` variants) is its own
-package; `nix-incremental` builds the full CLI.
+package; `nix-incremental` builds the full CLI (`nix-cli`
+internally — its own Meson `pname` is `nix`, not `nix-cli`) and gets
+the same treatment: 96% real ccache hits (63/65) on a same-source
+rebuild. Getting this wrong is silent, not an error — an earlier
+version of this wrapper matched the override callback on `target`
+directly and used it as the cache lookup key too, so `nix-incremental`
+built with the exact same (wrong) `target = "nix-cli"` string used for
+both, matching nothing (`pname` is `"nix"`) and restoring from
+`"empty"` regardless of `--override-input cache`. Passing the real
+`pname` as `target` and the flake attribute name as a separate `name`
+(the cache lookup/report key) fixed both.
 
 **Want every component to individually benefit from caching, not just
 whichever one you name?** Build `nix-all-components` instead of
