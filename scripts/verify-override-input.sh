@@ -86,7 +86,7 @@ verify_no_recompile() {
   warm_drv=$(nix path-info --derivation --override-input cache "git+file://$PWD?ref=HEAD" ".#$name")
   nix store delete "$warm_drv" $(nix-store -q --outputs "$warm_drv" 2>/dev/null) 2>/dev/null || true
   local log
-  if ! log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L ".#$name" -o "result-$name-warm" --builders "" 2>&1); then
+  if ! log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L ".#$name" -o "result-$name-warm" --builders "" --no-substitute 2>&1); then
     echo "override-input-verify[$name]: FAILED — build itself failed:" >&2
     echo "$log" >&2
     failures=$((failures + 1))
@@ -107,9 +107,11 @@ verify_no_recompile haskell
 # byte-identical run to run and Nix would otherwise substitute instead of
 # rebuilding, skipping the ccache report entirely. Force a real rebuild by
 # deleting any already-valid output for the exact (cache-overridden)
-# derivation first, and disabling remote builders for this one build — a
-# configured remote builder can still have (and hand back) the same
-# output even after it's deleted locally.
+# derivation first, and disabling both remote build machines (--builders "")
+# and substituters (--no-substitute) for this one build — a configured
+# remote builder or binary cache (e.g. this repo's own CI Cachix push) can
+# still have, and hand back, the same output even after it's deleted
+# locally.
 verify_ccache_hits() {
   local name="$1"
   nix build ".#$name" -o "result-$name-cold"
@@ -117,14 +119,14 @@ verify_ccache_hits() {
   warm_drv=$(nix path-info --derivation --override-input cache "git+file://$PWD?ref=HEAD" ".#$name")
   nix store delete "$warm_drv" $(nix-store -q --outputs "$warm_drv" 2>/dev/null) 2>/dev/null || true
   local log
-  if ! log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L ".#$name" -o "result-$name-warm" --builders "" 2>&1); then
+  if ! log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L ".#$name" -o "result-$name-warm" --builders "" --no-substitute 2>&1); then
     echo "override-input-verify[$name]: FAILED — build itself failed:" >&2
     echo "$log" >&2
     failures=$((failures + 1))
     return
   fi
   local hits
-  hits=$(echo "$log" | grep -oP "ccache\[$name\]: \K[0-9]+(?=/[0-9]+ hits)" | tail -1)
+  hits=$(echo "$log" | { grep -oP "ccache\[$name\]: \K[0-9]+(?=/[0-9]+ hits)" || true; } | tail -1)
   if [ "${hits:-0}" -gt 0 ]; then
     echo "override-input-verify[$name]: OK ($hits ccache hits)"
   else
@@ -176,14 +178,14 @@ verify_patch_incrementality() {
   warm_drv=$(nix path-info --derivation --override-input cache "git+file://$PWD?ref=HEAD" ".#$patched")
   nix store delete "$warm_drv" $(nix-store -q --outputs "$warm_drv" 2>/dev/null) 2>/dev/null || true
   local log
-  if ! log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L ".#$patched" -o "result-$patched-warm" --builders "" 2>&1); then
+  if ! log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L ".#$patched" -o "result-$patched-warm" --builders "" --no-substitute 2>&1); then
     echo "override-input-verify[$patched]: FAILED — build itself failed:" >&2
     echo "$log" >&2
     failures=$((failures + 1))
     return
   fi
   local hits
-  hits=$(echo "$log" | grep -oP "ccache\[$base\]: \K[0-9]+(?=/[0-9]+ hits)" | tail -1)
+  hits=$(echo "$log" | { grep -oP "ccache\[$base\]: \K[0-9]+(?=/[0-9]+ hits)" || true; } | tail -1)
   if [ "${hits:-0}" -gt 0 ]; then
     echo "override-input-verify[$patched]: OK ($hits ccache hits restoring from unpatched $base)"
   else
