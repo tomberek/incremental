@@ -47,8 +47,11 @@ The same same-source-rebuild check runs against real nixpkgs packages
 too (`nixpkgs-jq`, `nixpkgs-redis`, `nixpkgs-tmux`, `nixpkgs-python3`,
 `nixpkgs-perl`, `nixpkgs-fmt`, `nixpkgs-protobuf` — see README, "Real
 nixpkgs packages", for why each needs the wrapper it uses;
-`nixpkgs-llvm`/`nixpkgs-opencv` are excluded here, cold builds are 35+
-and ~27 minutes respectively). On top of
+`nixpkgs-llvm`/`nixpkgs-opencv`/`nixpkgs-kubernetes` are excluded
+here, cold builds are 35+, ~27, and ~15 minutes respectively —
+`nixpkgs-kubernetes` was also verified manually rather than added
+here, since Go has no ccache-style hit-rate report to grep in the
+first place). On top of
 that, each package's `-patched` sibling (`nixpkgs-jq-patched`, etc.)
 applies one small, real upstream commit on top of the unpatched
 build's cache and asserts a nonzero hit count restoring from it —

@@ -134,6 +134,11 @@ verify_ccache_hits hello-ccache
 # deliberately excluded here: cold builds took 35+ and ~27 minutes
 # respectively on 22 cores locally, and ubuntu-latest CI runners have
 # far fewer — verified locally instead, not on every push/PR.
+# nixpkgs-kubernetes (pkgs/nixpkgs-kubernetes.nix) is excluded for the
+# same reason (14m43s cold) and also has no ccache report line to
+# grep — it's Go, not ccache — so its incrementality was verified
+# manually via wall-clock (see README, "Go") rather than with a
+# verify_ccache_hits/verify_patch_incrementality call here.
 verify_ccache_hits nixpkgs-jq
 verify_ccache_hits nixpkgs-redis
 verify_ccache_hits nixpkgs-tmux

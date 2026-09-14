@@ -46,3 +46,6 @@ in
     mkIncrementalNixComponents
     ;
 }
+// import ./nixpkgs-kubernetes.nix {
+  inherit system pkgs mkIncrementalGoPackage;
+}

@@ -10,7 +10,12 @@ restoring, not the deciding.
 
 - **OpenCV** (`nixpkgs-opencv`, `pkgs.opencv4`, CMake): 99% real ccache
   hits on a same-source rebuild, full build **27m26s → 6m14s (~4.4x)** —
-  the biggest absolute wall-clock win measured here.
+  the biggest absolute wall-clock win measured here for a C/C++/ccache
+  package.
+- **Kubernetes** (`nixpkgs-kubernetes`, `pkgs.kubernetes`, Go, 6
+  `cmd/` components in one module): full build **14m43s → 4m17s
+  (~3.4x)** on a same-source rebuild — the biggest Go package tried
+  here, restoring `$GOCACHE` instead of ccache.
 - **LLVM** (`nixpkgs-llvm`, `pkgs.llvmPackages.llvm`, CMake/Ninja,
   ~4200 translation units): 98% real ccache hits on a same-source
   rebuild, `buildPhase` itself **35m17s → 1m20s (~26x)**.
@@ -19,9 +24,13 @@ restoring, not the deciding.
   and restoring from the *unpatched* build's cache still hits
   97.9%/98.9% — dropping by exactly the one file the patch touched,
   even at this scale. Same pattern confirmed on jq, redis, tmux,
-  python3, perl. A header-touching patch (fmt, protobuf) costs far
-  more — 22-24% — a genuinely different, expected result, not a bug;
-  see "Real nixpkgs packages" below.
+  python3, perl, and (by wall-clock, not a hit-rate line — Go has no
+  ccache-style report) kubernetes: a patch to one of its 6 components
+  (`kubeadm`) rebuilds in about the same time as the same-source
+  rebuild, confirming the other 5 weren't invalidated. A header-
+  touching patch (fmt, protobuf) costs far more — 22-24% — a
+  genuinely different, expected result, not a bug; see "Real nixpkgs
+  packages" below.
 - **A Haskell/GHC ecosystem that's safe by default**: unlike Cargo,
   GHC's recompilation-avoidance (via Cabal's own `previousIntermediates`
   mechanism) correctly detects real source changes under Nix's
@@ -154,7 +163,10 @@ Same shape for `.#zig` (`zig/main.zig`), `.#swift`
 `swift build` has no env var at all for its scratch directory — only a
 `--scratch-path` CLI flag — so `mkIncrementalSwiftPackage` exports the
 restored path as `$SWIFTPM_SCRATCH_PATH` and the package's own build/
-install phases pass it through explicitly.
+install phases pass it through explicitly. `.#nixpkgs-kubernetes`
+uses the same `mkIncrementalGoPackage` unchanged against a real, much
+bigger Go package (`pkgs.kubernetes`) — see "Real nixpkgs packages"
+for the numbers.
 
 
 Rust needs more: `buildRustPackage`'s `cargoInstallHook` looks for a
@@ -254,6 +266,7 @@ an estimate:
 | `nixpkgs-fmt` | ccache only (CMake) | 98% | ~87s → ~12s (~7x) |
 | `nixpkgs-protobuf` | ccache only (CMake) | — | buildPhase ~6m cold; `doCheck` disabled (own test suite alone runs 15m+) |
 | `nixpkgs-opencv` | ccache only (CMake) | 99% | 27m26s → 6m14s (~4.4x) |
+| `nixpkgs-kubernetes` | `mkIncrementalGoPackage` (`$GOCACHE`, no ccache) | — | 14m43s → 4m17s (~3.4x) |
 
 ```
 $ nix build .#nixpkgs-jq
@@ -262,8 +275,13 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-jq
 
 (same for `nixpkgs-redis`/`nixpkgs-tmux`/`nixpkgs-python3`/
 `nixpkgs-perl`/`nixpkgs-llvm`/`nixpkgs-fmt`/`nixpkgs-protobuf`/
-`nixpkgs-opencv`; `nixpkgs-llvm` and `nixpkgs-opencv` aren't in CI —
-cold builds take 35+ and ~27 minutes respectively on 22 local cores.)
+`nixpkgs-opencv`/`nixpkgs-kubernetes`; `nixpkgs-llvm`,
+`nixpkgs-opencv`, and `nixpkgs-kubernetes` aren't in CI — cold builds
+take 35+, ~27, and ~15 minutes respectively on 22 local cores.
+`nixpkgs-kubernetes` also has no hit-rate column above — it's
+`mkIncrementalGoPackage` restoring `$GOCACHE`, the same mechanism as
+the toy `.#golang` example, not ccache, so there's no per-file hit
+count to report; only wall-clock is measured.)
 
 `tmux` hits 100% but only gets ~1.6x, and `llvm`'s `buildPhase` speedup
 (~26x) doesn't carry through to its overall wall-clock (~4.5x) —
@@ -310,6 +328,7 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-jq-pa
 | `nixpkgs-fmt-patched` | header fix, `include/fmt/format.h` | 13/54 (24%) | 98% unpatched — every `.cc` includes the header |
 | `nixpkgs-protobuf-patched` | leaf `.cc` + its header, `repeated_field.{cc,h}` | 80/360 (22%) | — same "widely-included header" cost, at 10x the scale |
 | `nixpkgs-opencv-patched` | one line, `connectedcomponents.cpp` | 1855/1875 (98.9%) | 99.0% unpatched — a narrow leaf fix, not a header |
+| `nixpkgs-kubernetes-patched` | one leaf file, `cmd/kubeadm/.../config.go` | — (Go, no hits) | 4m49s vs. 4m17s same-source — the other 5 built components weren't invalidated |
 
 A header change costs proportionally more than a leaf-file one — not
 a bug, the same tradeoff any C/C++ build (cached or not) makes:
