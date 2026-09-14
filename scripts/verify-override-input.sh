@@ -86,7 +86,12 @@ verify_no_recompile() {
   warm_drv=$(nix path-info --derivation --override-input cache "git+file://$PWD?ref=HEAD" ".#$name")
   nix store delete "$warm_drv" $(nix-store -q --outputs "$warm_drv" 2>/dev/null) 2>/dev/null || true
   local log
-  log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L ".#$name" -o "result-$name-warm" --builders "" 2>&1)
+  if ! log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L ".#$name" -o "result-$name-warm" --builders "" 2>&1); then
+    echo "override-input-verify[$name]: FAILED — build itself failed:" >&2
+    echo "$log" >&2
+    failures=$((failures + 1))
+    return
+  fi
   if echo "$log" | grep -P '^\S+> \[\d+ of \d+\] Compiling' | grep -qv 'Setup\.hs'; then
     echo "override-input-verify[$name]: FAILED — expected no module recompiles, got:" >&2
     echo "$log" | grep -P '^\S+> \[\d+ of \d+\] Compiling' >&2
@@ -112,7 +117,12 @@ verify_ccache_hits() {
   warm_drv=$(nix path-info --derivation --override-input cache "git+file://$PWD?ref=HEAD" ".#$name")
   nix store delete "$warm_drv" $(nix-store -q --outputs "$warm_drv" 2>/dev/null) 2>/dev/null || true
   local log
-  log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L ".#$name" -o "result-$name-warm" --builders "" 2>&1)
+  if ! log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L ".#$name" -o "result-$name-warm" --builders "" 2>&1); then
+    echo "override-input-verify[$name]: FAILED — build itself failed:" >&2
+    echo "$log" >&2
+    failures=$((failures + 1))
+    return
+  fi
   local hits
   hits=$(echo "$log" | grep -oP "ccache\[$name\]: \K[0-9]+(?=/[0-9]+ hits)" | tail -1)
   if [ "${hits:-0}" -gt 0 ]; then
@@ -166,7 +176,12 @@ verify_patch_incrementality() {
   warm_drv=$(nix path-info --derivation --override-input cache "git+file://$PWD?ref=HEAD" ".#$patched")
   nix store delete "$warm_drv" $(nix-store -q --outputs "$warm_drv" 2>/dev/null) 2>/dev/null || true
   local log
-  log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L ".#$patched" -o "result-$patched-warm" --builders "" 2>&1)
+  if ! log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L ".#$patched" -o "result-$patched-warm" --builders "" 2>&1); then
+    echo "override-input-verify[$patched]: FAILED — build itself failed:" >&2
+    echo "$log" >&2
+    failures=$((failures + 1))
+    return
+  fi
   local hits
   hits=$(echo "$log" | grep -oP "ccache\[$base\]: \K[0-9]+(?=/[0-9]+ hits)" | tail -1)
   if [ "${hits:-0}" -gt 0 ]; then
