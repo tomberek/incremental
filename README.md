@@ -111,7 +111,7 @@ only recognizes that shape under `apps.<system>.<name>`, not at an
 arbitrary attrpath; `writeShellApplication`'s `meta.mainProgram` makes
 a plain derivation work anywhere instead.)
 
-`mkIncrementalGoPackage`, `mkIncrementalZigPackage`, and
+`mkIncrementalGoPackage`, `mkIncrementalZigPackage`, `mkIncrementalSwiftPackage`, and
 `mkIncrementalRustPackage` bake in the right `cacheVars`/`phase` for
 those ecosystems (see "Examples in this repo" for why each needs what
 it needs). `mkIncrementalCcachePackage` does the same for ccache — one
@@ -122,18 +122,24 @@ autoconf's `--cache-file`. For anything else, compose
 
 ## Examples in this repo
 
-### Go / Zig / Rust
+### Go / Zig / Swift / Rust
 
 ```
 $ nix build .#golang && echo "// hi" >> golang/main.go
 $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#golang
 ```
 
-Same shape for `.#zig` (`zig/main.zig`) and `.#rust`
+Same shape for `.#zig` (`zig/main.zig`), `.#swift`
+(`swift/Sources/swift-example/main.swift`), and `.#rust`
 (`rust/src/main.rs`). Go's `buildGoModule` sets `$GOCACHE` in its own
 `configurePhase`, so the restore hooks `postConfigure`. Zig's
 `zigConfigurePhase` reassigns `ZIG_GLOBAL_CACHE_DIR` but never
 `ZIG_LOCAL_CACHE_DIR`, so both are exported earlier, in `preConfigure`.
+`swift build` has no env var at all for its scratch directory — only a
+`--scratch-path` CLI flag — so `mkIncrementalSwiftPackage` exports the
+restored path as `$SWIFTPM_SCRATCH_PATH` and the package's own build/
+install phases pass it through explicitly.
+
 
 Rust needs more: `buildRustPackage`'s `cargoInstallHook` looks for a
 fixed *relative* path (`target/<subdir>/<buildType>`), not
@@ -205,6 +211,8 @@ an estimate:
 | `nixpkgs-python3` | ccache only, debug logging disabled | 99% | 4m16s → 3m24s (~1.2x) |
 | `nixpkgs-perl` | ccache only (`Configure`, not autoconf) | 99% | 2m57s → 1m48s (~1.6x) |
 | `nixpkgs-llvm` | ccache only (CMake/Ninja) | 98% | buildPhase 35m17s → 1m20s (~26x); overall 10816s → 2377s (~4.5x) |
+| `nixpkgs-fmt` | ccache only (CMake) | 98% | ~87s → ~12s (~7x) |
+| `nixpkgs-protobuf` | ccache only (CMake) | — | buildPhase ~6m cold; `doCheck` disabled (own test suite alone runs 15m+) |
 
 ```
 $ nix build .#nixpkgs-jq
@@ -212,8 +220,9 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-jq
 ```
 
 (same for `nixpkgs-redis`/`nixpkgs-tmux`/`nixpkgs-python3`/
-`nixpkgs-perl`/`nixpkgs-llvm`; `nixpkgs-llvm` isn't in CI — a cold
-build takes 35+ minutes on 22 local cores.)
+`nixpkgs-perl`/`nixpkgs-llvm`/`nixpkgs-fmt`/`nixpkgs-protobuf`;
+`nixpkgs-llvm` isn't in CI — a cold build takes 35+ minutes on 22
+local cores.)
 
 `tmux` hits 100% but only gets ~1.6x, and `llvm`'s `buildPhase` speedup
 (~26x) doesn't carry through to its overall wall-clock (~4.5x) —
@@ -225,9 +234,10 @@ the package. `python3` hits the same pattern for a different reason:
 `postInstall` runs `python -m compileall` over the entire stdlib three
 times, pure bytecode compilation ccache never sees.
 
-`redis`/`perl`/`llvm` are ccache-only (no `--cache-file`) because none
-has a real autoconf `./configure`: redis is a plain Makefile, perl's
-own `Configure` isn't autoconf, llvm is CMake/Ninja. `python3` *does*
+`redis`/`perl`/`llvm`/`fmt`/`protobuf` are ccache-only (no
+`--cache-file`) because none has a real autoconf `./configure`: redis
+is a plain Makefile, perl's own `Configure` isn't autoconf, llvm/fmt/
+protobuf are CMake. `python3` *does*
 have a real `./configure`, but its nixpkgs derivation restricts
 `outputChecks.out` from referencing `openssl-dev`; a composed
 `incremental` output inherits that same restriction, and
@@ -256,6 +266,15 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-jq-pa
 |---|---|---|---|
 | `nixpkgs-jq-patched` | one line, `src/main.c` | 23/24 (95%) | same 95% |
 | `nixpkgs-llvm-patched` | one function, `MemoryDependenceAnalysis.cpp` | 4075/4159 (97.9%) | 98.0% unpatched, ~4200 TUs |
+| `nixpkgs-fmt-patched` | header fix, `include/fmt/format.h` | 13/54 (24%) | 98% unpatched — every `.cc` includes the header |
+| `nixpkgs-protobuf-patched` | leaf `.cc` + its header, `repeated_field.{cc,h}` | 80/360 (22%) | — same "widely-included header" cost, at 10x the scale |
+
+A header change costs proportionally more than a leaf-file one — not
+a bug, the same tradeoff any C/C++ build (cached or not) makes:
+`fmt`/`protobuf`'s patches touch a header every translation unit
+includes, so most of the build recompiles regardless of caching,
+while `jq`/`llvm`'s patches touch one file only their own translation
+unit depends on.
 
 Not every C package benefits — tried and dropped, each confirmed by
 measurement, not guessed from reading the build:

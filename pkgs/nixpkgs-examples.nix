@@ -43,6 +43,28 @@
 # failures) — the python3 debug-log leak seems to have been something
 # specific to that build, not something proportional to file count.
 #
+# fmt (ccacheOnly — CMake, no ./configure at all) is the first CMake
+# C++ example rather than C: 98% real hits (53/54), buildPhase-level
+# speedup ~7x (measured ~87s -> ~12s cold vs. restored). Its
+# fmt-write-int-chr-range-check patch (see patches/) is a real header
+# fix (include/fmt/format.h, included by every .cc in the package),
+# not a leaf .cc — restoring from the unpatched cache and building the
+# patched one hits only 24% (13/54), a deliberate contrast with jq/
+# tmux/etc.'s narrow leaf-file patches: a widely-#include'd header
+# invalidates most translation units, same as changing a widely-
+# depended-on function signature would in any C/C++ codebase, ccache
+# or not.
+#
+# protobuf (ccacheOnly — CMake) is the other "go bigger" C++ test:
+# buildPhase alone is a real multi-minute compile (measured ~6m cold).
+# Its own patch (protobuf-repeated-field-self-merge-abort.patch) is a
+# real upstream security fix touching both a leaf .cc and its header
+# (repeated_field.h, also widely included) — hits 22% (80/360)
+# restoring from the unpatched cache, the same "header patches are
+# expensive" lesson as fmt's, just at protobuf's scale. doCheck is
+# disabled here: protobuf's own test suite alone runs well past 15
+# minutes, dwarfing the ~6-minute build it would be validating.
+#
 # Tried and dropped as examples: curl hits 100% in ccache but shows
 # no real speedup — its build time is dominated by man-page
 # rendering/install, not compilation, so ccache has nothing to save.
@@ -177,6 +199,20 @@ let
       drv = pkgs.llvmPackages.llvm;
       ccacheOnly = true;
       patch = ../patches/llvm-memdep-reverse-map-helper.patch;
+    }
+    {
+      name = "nixpkgs-fmt";
+      drv = pkgs.fmt;
+      ccacheOnly = true;
+      patch = ../patches/fmt-write-int-chr-range-check.patch;
+    }
+    {
+      name = "nixpkgs-protobuf";
+      drv = pkgs.protobuf.overrideAttrs (old: {
+        doCheck = false;
+      });
+      ccacheOnly = true;
+      patch = ../patches/protobuf-repeated-field-self-merge-abort.patch;
     }
   ];
 in

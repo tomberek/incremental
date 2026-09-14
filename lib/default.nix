@@ -20,6 +20,9 @@ let
   mkEcosystemPackage = import ./mk-ecosystem-package.nix { inherit inputs mkIncremental; };
   mkIncrementalGoPackage = import ./mk-incremental-go-package.nix { inherit mkEcosystemPackage; };
   mkIncrementalZigPackage = import ./mk-incremental-zig-package.nix { inherit mkEcosystemPackage; };
+  mkIncrementalSwiftPackage = import ./mk-incremental-swift-package.nix {
+    inherit mkEcosystemPackage;
+  };
   mkIncrementalRustPackage = import ./mk-incremental-rust-package.nix {
     inherit
       inputs
@@ -50,6 +53,7 @@ in
     mkIncrementalAutotoolsPackage
     mkIncrementalGoPackage
     mkIncrementalZigPackage
+    mkIncrementalSwiftPackage
     mkIncrementalRustPackage
     ccacheEnv
     mkIncrementalCcachePackage

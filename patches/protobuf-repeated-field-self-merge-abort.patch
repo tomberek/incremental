@@ -1,0 +1,87 @@
+commit 5b8adb2a8a9232044c961d6cd98dd4731c6fd633
+Author: Adil Burak Şen <56400880+adilburaksen@users.noreply.github.com>
+Date:   Fri Jun 5 07:16:59 2026 -0700
+
+    Fix RepeatedField::MergeFrom self-merge heap pointer disclosure (#27607)
+    
+    ## Summary
+    
+    `RepeatedField<T>::MergeFrom` has an unsafe self-merge path. When `MergeFrom(self)` is called on a field at SOO capacity (2 elements for `int32_t`), `Reserve()` triggers a SOO→heap transition. The `other_is_soo` flag captured before `Reserve()` becomes stale — `other.elements(stale_true)` returns `soo_data_[]`, which now holds the raw `HeapRep*` pointer bytes. `UninitializedCopyN` then copies those bytes as `int32_t` values, appending two elements containing the low/high 32 bits of the heap address.
+    
+    `ABSL_DCHECK_NE(&other, this)` caught this in debug builds but was compiled out with `-DNDEBUG`, so release builds proceeded silently and produced corrupted contents / heap-address disclosure.
+    
+    ## Fix
+    
+    Self-merge is undefined behavior. Rather than silently no-op, this turns it into a well-defined termination: an out-of-line `internal::LogSelfMergeAndAbort()` that fires `ABSL_LOG(FATAL)` in all build modes.
+    
+    ```cpp
+    template <typename Element>
+    inline void RepeatedField<Element>::MergeFrom(const RepeatedField& other) {
+      if (ABSL_PREDICT_FALSE(&other == this)) {
+        PROTOBUF_NO_MERGE internal::LogSelfMergeAndAbort();
+      }
+      ...
+    ```
+    
+    The abort helper is declared out-of-line (in `repeated_field.cc`) so the failure path does not pull `ABSL_LOG` streaming support into every inlined `MergeFrom` instantiation. The previously-existing `ABSL_DCHECK_NE(&other, this)` is now dead code (the self-reference branch terminates before reaching it) and has been removed.
+    
+    ## Test
+    
+    `RepeatedField.MergeFromSelfFailsWithATermination` exercises the SOO-capacity self-merge — the case that previously appended heap-pointer bytes in release builds — and asserts it now terminates:
+    
+    ```cpp
+    RepeatedField<int32_t> field;
+    field.Add(1);
+    field.Add(2);
+    EXPECT_DEATH(field.MergeFrom(field), "self-reference");
+    ```
+    
+    Closes #27607
+    
+    COPYBARA_INTEGRATE_REVIEW=https://github.com/protocolbuffers/protobuf/pull/27607 from adilburaksen:fix/repeated-field-self-merge cbe6a42d7ae2ed8474fd4226f1aca0d349e7c452
+    PiperOrigin-RevId: 927283856
+
+diff --git a/src/google/protobuf/repeated_field.cc b/src/google/protobuf/repeated_field.cc
+index c4b444b2c..717236670 100644
+--- a/src/google/protobuf/repeated_field.cc
++++ b/src/google/protobuf/repeated_field.cc
+@@ -56,6 +56,12 @@ void LogIndexOutOfBounds(int index, int size) {
+   }
+   ABSL_UNREACHABLE();
+ }
++
++[[noreturn]] void LogSelfMergeAndAbort() noexcept {
++  ABSL_LOG(FATAL)
++      << "MergeFrom called with self-reference; "
++         "merging a RepeatedField with itself is undefined behavior.";
++}
+ }  // namespace internal
+ 
+ template <>
+diff --git a/src/google/protobuf/repeated_field.h b/src/google/protobuf/repeated_field.h
+index 8c805fab2..2c1b8cd26 100644
+--- a/src/google/protobuf/repeated_field.h
++++ b/src/google/protobuf/repeated_field.h
+@@ -254,6 +254,11 @@ class SooRep {
+   };
+ };
+ 
++// Out-of-line abort for MergeFrom self-reference. Declared here (not in the
++// call site) so that the failure path does not pull ABSL_CHECK streaming
++// support into every inlined MergeFrom instantiation.
++[[noreturn]] PROTOBUF_EXPORT void LogSelfMergeAndAbort() noexcept;
++
+ }  // namespace internal
+ 
+ // RepeatedField is used to represent repeated fields of a primitive type (in
+@@ -1228,7 +1233,9 @@ inline void RepeatedField<Element>::Clear() {
+ 
+ template <typename Element>
+ inline void RepeatedField<Element>::MergeFrom(const RepeatedField& other) {
+-  ABSL_DCHECK_NE(&other, this);
++  if (ABSL_PREDICT_FALSE(&other == this)) {
++    PROTOBUF_NO_MERGE internal::LogSelfMergeAndAbort();
++  }
+   const bool other_is_soo = other.is_soo();
+   if (auto other_size = other.size()) {
+     const int old_size = size();

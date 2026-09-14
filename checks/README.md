@@ -40,16 +40,17 @@ asserts a nonzero ccache hit count.
 
 The same same-source-rebuild check runs against real nixpkgs packages
 too (`nixpkgs-jq`, `nixpkgs-redis`, `nixpkgs-tmux`, `nixpkgs-python3`,
-`nixpkgs-perl` — see README, "Real nixpkgs packages", for why each
-needs the wrapper it uses; `nixpkgs-llvm` is excluded here, cold build
-is 35+ minutes). On top of that, each package's `-patched` sibling
-(`nixpkgs-jq-patched`, etc.) applies one small, real upstream commit
-on top of the unpatched build's cache and asserts a nonzero hit count
-restoring from it — same-source rebuilds only prove the restore/
-nuke-refs mechanism has no false negatives, not that a real source
-change only invalidates what it touches; see README, "Real nixpkgs
-packages" (the "Proving incrementality under a real code change"
-part) for what these confirm and the measured hit rates.
+`nixpkgs-perl`, `nixpkgs-fmt`, `nixpkgs-protobuf` — see README, "Real
+nixpkgs packages", for why each needs the wrapper it uses;
+`nixpkgs-llvm` is excluded here, cold build is 35+ minutes). On top of
+that, each package's `-patched` sibling (`nixpkgs-jq-patched`, etc.)
+applies one small, real upstream commit on top of the unpatched
+build's cache and asserts a nonzero hit count restoring from it —
+same-source rebuilds only prove the restore/nuke-refs mechanism has no
+false negatives, not that a real source change only invalidates what
+it touches; see README, "Real nixpkgs packages" (the "Proving
+incrementality under a real code change" part) for what these confirm
+and the measured hit rates.
 
 CI runs both this and `nix flake check` on every push.
 

@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-EDIT_FILES=(c/main.c golang/main.go zig/main.zig rust/src/main.rs)
+EDIT_FILES=(c/main.c golang/main.go zig/main.zig rust/src/main.rs swift/Sources/swift-example/main.swift)
 
 if ! git diff --quiet -- "${EDIT_FILES[@]}"; then
   echo "error: these files must be clean before running this script:" >&2
@@ -63,6 +63,11 @@ verify_edit rust rust/src/main.rs \
   'println!("MARKER");' \
   bin/rust-example
 
+verify_edit swift swift/Sources/swift-example/main.swift \
+  'print("hello from swift")' \
+  'print("MARKER")' \
+  bin/swift-example
+
 # hello-ccache wraps pkgs.hello unchanged, so its derivation is
 # byte-identical run to run and Nix would otherwise substitute instead of
 # rebuilding, skipping the ccache report entirely. Force a real rebuild by
@@ -104,6 +109,8 @@ verify_ccache_hits nixpkgs-redis
 verify_ccache_hits nixpkgs-tmux
 verify_ccache_hits nixpkgs-python3
 verify_ccache_hits nixpkgs-perl
+verify_ccache_hits nixpkgs-fmt
+verify_ccache_hits nixpkgs-protobuf
 
 # Everything above restores from a same-source build — it proves the
 # restore/nuke-refs mechanism doesn't have false negatives, but not
@@ -141,6 +148,8 @@ verify_patch_incrementality nixpkgs-redis nixpkgs-redis-patched
 verify_patch_incrementality nixpkgs-tmux nixpkgs-tmux-patched
 verify_patch_incrementality nixpkgs-python3 nixpkgs-python3-patched
 verify_patch_incrementality nixpkgs-perl nixpkgs-perl-patched
+verify_patch_incrementality nixpkgs-fmt nixpkgs-fmt-patched
+verify_patch_incrementality nixpkgs-protobuf nixpkgs-protobuf-patched
 
 if [ "$failures" -gt 0 ]; then
   echo "override-input-verify: $failures check(s) failed" >&2

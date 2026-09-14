@@ -1,0 +1,49 @@
+commit 7852fc384ce4232284fc685f66f70ed99b0c2cd4
+Author: Victor Zverovich <victor.zverovich@gmail.com>
+Date:   Fri Jul 17 11:36:52 2026 -0700
+
+    Fix out-of-range integers with the 'c' presentation type (#4839)
+    
+    Formatting an integer with ':c' used the magnitude (abs_value) and never
+    range-checked, so negatives were mangled and out-of-range values silently
+    truncated. Copy the value as a character and report an error when it is out
+    of range, treating all character types as unsigned for portability.
+
+diff --git a/include/fmt/format.h b/include/fmt/format.h
+index f2ee623d..99743f1c 100644
+--- a/include/fmt/format.h
++++ b/include/fmt/format.h
+@@ -1961,6 +1961,15 @@ FMT_CONSTEXPR inline void prefix_append(unsigned& prefix, unsigned value) {
+   prefix += (1u + (value > 0xff ? 1 : 0)) << 24;
+ }
+ 
++// Writes an integer as a character, treating chars as unsigned.
++template <typename Char, typename OutputIt, typename UInt>
++FMT_CONSTEXPR auto write_int_chr(OutputIt out, UInt abs_value, bool negative,
++                                 const format_specs& specs) -> OutputIt {
++  if (negative || abs_value > max_value<make_unsigned_t<Char>>())
++    report_error("character value out of range");
++  return write_char<Char>(out, static_cast<Char>(abs_value), specs);
++}
++
+ // Writes a decimal integer with digit grouping.
+ template <typename OutputIt, typename UInt, typename Char>
+ auto write_int(OutputIt out, UInt value, unsigned prefix,
+@@ -1997,7 +2006,7 @@ auto write_int(OutputIt out, UInt value, unsigned prefix,
+     format_base2e<char>(1, appender(buffer), value, num_digits);
+     break;
+   case presentation_type::chr:
+-    return write_char<Char>(out, static_cast<Char>(value), specs);
++    return write_int_chr<Char>(out, value, (prefix & 0xff) == '-', specs);
+   }
+ 
+   unsigned size = (prefix != 0 ? prefix >> 24 : 0) + to_unsigned(num_digits) +
+@@ -2124,7 +2133,7 @@ FMT_CONSTEXPR FMT_INLINE auto write_int(OutputIt out, write_int_arg<T> arg,
+       prefix_append(prefix, unsigned(specs.upper() ? 'B' : 'b') << 8 | '0');
+     break;
+   case presentation_type::chr:
+-    return write_char<Char>(out, static_cast<Char>(abs_value), specs);
++    return write_int_chr<Char>(out, abs_value, (prefix & 0xff) == '-', specs);
+   }
+ 
+   // Write an integer in the format
