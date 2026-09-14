@@ -86,7 +86,7 @@ verify_no_recompile() {
   warm_drv=$(nix path-info --derivation --override-input cache "git+file://$PWD?ref=HEAD" ".#$name")
   nix store delete "$warm_drv" $(nix-store -q --outputs "$warm_drv" 2>/dev/null) 2>/dev/null || true
   local log
-  if ! log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L ".#$name" -o "result-$name-warm" --builders "" --no-substitute 2>&1); then
+  if ! log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L ".#$name" -o "result-$name-warm" --builders "" --option substituters "https://cache.nixos.org" 2>&1); then
     echo "override-input-verify[$name]: FAILED — build itself failed:" >&2
     echo "$log" >&2
     failures=$((failures + 1))
@@ -107,11 +107,15 @@ verify_no_recompile haskell
 # byte-identical run to run and Nix would otherwise substitute instead of
 # rebuilding, skipping the ccache report entirely. Force a real rebuild by
 # deleting any already-valid output for the exact (cache-overridden)
-# derivation first, and disabling both remote build machines (--builders "")
-# and substituters (--no-substitute) for this one build — a configured
-# remote builder or binary cache (e.g. this repo's own CI Cachix push) can
-# still have, and hand back, the same output even after it's deleted
-# locally.
+# derivation first, disabling remote build machines (--builders ""), and
+# restricting substituters to just cache.nixos.org — dependencies (glibc,
+# gcc, etc.) still substitute normally, but this repo's own CI Cachix push
+# (which, once populated by a prior run, would otherwise just hand back
+# the exact --override-input cache-derivation output instead of doing a
+# real local rebuild) is excluded. --no-substitute is too broad here: it
+# also blocks every *dependency* substitution, forcing a from-scratch
+# bootstrap rebuild of ~1000 unrelated derivations (confirmed: this is
+# exactly what broke CI before this was narrowed to --option substituters).
 verify_ccache_hits() {
   local name="$1"
   nix build ".#$name" -o "result-$name-cold"
@@ -119,7 +123,7 @@ verify_ccache_hits() {
   warm_drv=$(nix path-info --derivation --override-input cache "git+file://$PWD?ref=HEAD" ".#$name")
   nix store delete "$warm_drv" $(nix-store -q --outputs "$warm_drv" 2>/dev/null) 2>/dev/null || true
   local log
-  if ! log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L ".#$name" -o "result-$name-warm" --builders "" --no-substitute 2>&1); then
+  if ! log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L ".#$name" -o "result-$name-warm" --builders "" --option substituters "https://cache.nixos.org" 2>&1); then
     echo "override-input-verify[$name]: FAILED — build itself failed:" >&2
     echo "$log" >&2
     failures=$((failures + 1))
@@ -178,7 +182,7 @@ verify_patch_incrementality() {
   warm_drv=$(nix path-info --derivation --override-input cache "git+file://$PWD?ref=HEAD" ".#$patched")
   nix store delete "$warm_drv" $(nix-store -q --outputs "$warm_drv" 2>/dev/null) 2>/dev/null || true
   local log
-  if ! log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L ".#$patched" -o "result-$patched-warm" --builders "" --no-substitute 2>&1); then
+  if ! log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L ".#$patched" -o "result-$patched-warm" --builders "" --option substituters "https://cache.nixos.org" 2>&1); then
     echo "override-input-verify[$patched]: FAILED — build itself failed:" >&2
     echo "$log" >&2
     failures=$((failures + 1))
