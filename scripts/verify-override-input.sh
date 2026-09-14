@@ -79,6 +79,20 @@ verify_edit swift swift/Sources/swift-example/main.swift \
 # source tree) is excluded by matching its literal path in the
 # GHC "Compiling X ( <path>, ..." line, not by module name — the
 # real package's own entry point is also conventionally named `Main`.
+#
+# --override-input cache "git+file://$PWD?ref=HEAD" makes `cache` a
+# nested evaluation of this same flake — resolving
+# cache.packages.${system}.haskell.intermediates can require actually
+# building cache's own copy of haskell first, if that exact package
+# was never built with intermediates on this machine before (routine
+# on a fresh CI runner). That nested cold build's "Compiling
+# PandocCLI.*" lines land in the same captured log, ahead of the real
+# target's (warm, correctly-skipped) build — same double-build-in-
+# one-log issue documented for the ccache hit-rate checks below, just
+# without a numeric report to `tail -1`. Fixed the same way: each real
+# build attempt starts by recompiling Setup.hs, so only the log
+# segment from the *last* such line onward belongs to the actual
+# target build being checked.
 verify_no_recompile() {
   local name="$1"
   nix build ".#$name" -o "result-$name-cold"
@@ -92,9 +106,12 @@ verify_no_recompile() {
     failures=$((failures + 1))
     return
   fi
-  if echo "$log" | grep -P '^\S+> \[\d+ of \d+\] Compiling' | grep -qv 'Setup\.hs'; then
+  local last_setup_line target_log
+  last_setup_line=$(echo "$log" | { grep -n 'Setup\.hs' || true; } | tail -1 | cut -d: -f1)
+  target_log=$(echo "$log" | tail -n "+${last_setup_line:-1}")
+  if echo "$target_log" | grep -P '^\S+> \[\d+ of \d+\] Compiling' | grep -qv 'Setup\.hs'; then
     echo "override-input-verify[$name]: FAILED — expected no module recompiles, got:" >&2
-    echo "$log" | grep -P '^\S+> \[\d+ of \d+\] Compiling' >&2
+    echo "$target_log" | grep -P '^\S+> \[\d+ of \d+\] Compiling' >&2
     failures=$((failures + 1))
   else
     echo "override-input-verify[$name]: OK (no module recompiles restoring from same-source cache)"
