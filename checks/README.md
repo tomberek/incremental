@@ -29,10 +29,15 @@ git/network access, and all stay hermetic under the build sandbox.
 `scripts/verify-override-input.sh` checks a different layer: the
 literal `--override-input cache "git+file://$PWD?ref=HEAD"` CLI
 workflow documented in the main README, for real, for every example.
-For each of `c`/`golang`/`zig`/`rust` it builds cold, edits the source
-with a unique marker, rebuilds via `--override-input`, and asserts the
-marker actually shows up when running the binary (reverting the edit
-either way). `hello-ccache` has no source to edit, so it instead
+For each of `c`/`golang`/`zig`/`swift`/`rust` it builds cold, edits the
+source with a unique marker, rebuilds via `--override-input`, and
+asserts the marker actually shows up when running the binary
+(reverting the edit either way). `haskell` (`pandoc-cli`) has no
+custom source to edit and no ccache hit-rate line to grep — instead,
+it forces a real rebuild restoring the same-source cache and asserts
+none of the package's own modules recompiled (nixpkgs' own
+`previousIntermediates` mechanism handles the restore; see README,
+"Haskell"). `hello-ccache` has no source to edit, so it instead
 deletes its existing output and forces a fully local rebuild (its
 derivation is otherwise byte-identical run to run, so Nix — or a
 configured remote builder — would just hand back the old output) and
@@ -42,7 +47,8 @@ The same same-source-rebuild check runs against real nixpkgs packages
 too (`nixpkgs-jq`, `nixpkgs-redis`, `nixpkgs-tmux`, `nixpkgs-python3`,
 `nixpkgs-perl`, `nixpkgs-fmt`, `nixpkgs-protobuf` — see README, "Real
 nixpkgs packages", for why each needs the wrapper it uses;
-`nixpkgs-llvm` is excluded here, cold build is 35+ minutes). On top of
+`nixpkgs-llvm`/`nixpkgs-opencv` are excluded here, cold builds are 35+
+and ~27 minutes respectively). On top of
 that, each package's `-patched` sibling (`nixpkgs-jq-patched`, etc.)
 applies one small, real upstream commit on top of the unpatched
 build's cache and asserts a nonzero hit count restoring from it —

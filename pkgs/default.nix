@@ -11,6 +11,7 @@ let
     mkIncrementalZigPackage
     mkIncrementalSwiftPackage
     mkIncrementalRustPackage
+    mkIncrementalHaskellPackage
     mkIncrementalNixComponents
     ;
 in
@@ -27,6 +28,7 @@ in
   zig = import ./zig.nix { inherit system pkgs mkIncrementalZigPackage; };
   swift = import ./swift.nix { inherit system pkgs mkIncrementalSwiftPackage; };
   rust = import ./rust.nix { inherit system pkgs mkIncrementalRustPackage; };
+  haskell = import ./haskell.nix { inherit system pkgs mkIncrementalHaskellPackage; };
 }
 // import ./nixpkgs-examples.nix {
   inherit

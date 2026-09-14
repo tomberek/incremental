@@ -68,6 +68,36 @@ verify_edit swift swift/Sources/swift-example/main.swift \
   'print("MARKER")' \
   bin/swift-example
 
+# haskell (pandoc-cli, via mkIncrementalHaskellPackage) uses nixpkgs'
+# own previousIntermediates mechanism, not ccache — there's no
+# "ccache[name]: N/M hits" line to grep. Instead: force a real rebuild
+# restoring from the same-source cache, and assert none of the
+# package's own modules recompiled (only relinking is expected to run,
+# since the object files came from the restored intermediates output).
+# Setup.hs (cabal's own build driver, always rebuilt from scratch —
+# it isn't part of `dist/build` and comes from nowhere but the fresh
+# source tree) is excluded by matching its literal path in the
+# GHC "Compiling X ( <path>, ..." line, not by module name — the
+# real package's own entry point is also conventionally named `Main`.
+verify_no_recompile() {
+  local name="$1"
+  nix build ".#$name" -o "result-$name-cold"
+  local warm_drv
+  warm_drv=$(nix path-info --derivation --override-input cache "git+file://$PWD?ref=HEAD" ".#$name")
+  nix store delete "$warm_drv" $(nix-store -q --outputs "$warm_drv" 2>/dev/null) 2>/dev/null || true
+  local log
+  log=$(nix build --override-input cache "git+file://$PWD?ref=HEAD" -L ".#$name" -o "result-$name-warm" --builders "" 2>&1)
+  if echo "$log" | grep -P '^\S+> \[\d+ of \d+\] Compiling' | grep -qv 'Setup\.hs'; then
+    echo "override-input-verify[$name]: FAILED — expected no module recompiles, got:" >&2
+    echo "$log" | grep -P '^\S+> \[\d+ of \d+\] Compiling' >&2
+    failures=$((failures + 1))
+  else
+    echo "override-input-verify[$name]: OK (no module recompiles restoring from same-source cache)"
+  fi
+}
+
+verify_no_recompile haskell
+
 # hello-ccache wraps pkgs.hello unchanged, so its derivation is
 # byte-identical run to run and Nix would otherwise substitute instead of
 # rebuilding, skipping the ccache report entirely. Force a real rebuild by
@@ -100,10 +130,10 @@ verify_ccache_hits hello-ccache
 # check the same mechanism (a shallow vs. recursive nuke-refs bug
 # regressed exactly this — see git history) against real, sizable
 # nixpkgs packages instead of this repo's own toy examples.
-# nixpkgs-llvm (see nixpkgs-examples.nix) is deliberately excluded
-# here: a cold build took 35+ minutes on 22 cores locally, and
-# ubuntu-latest CI runners have far fewer — verified locally instead,
-# not on every push/PR.
+# nixpkgs-llvm and nixpkgs-opencv (see nixpkgs-examples.nix) are
+# deliberately excluded here: cold builds took 35+ and ~27 minutes
+# respectively on 22 cores locally, and ubuntu-latest CI runners have
+# far fewer — verified locally instead, not on every push/PR.
 verify_ccache_hits nixpkgs-jq
 verify_ccache_hits nixpkgs-redis
 verify_ccache_hits nixpkgs-tmux
@@ -122,8 +152,8 @@ verify_ccache_hits nixpkgs-protobuf
 # unpatched build's cache and building the patched one exercises a
 # genuine single-file diff. Expect high but non-100% hits: only the
 # patched file (and anything that depends on it) should miss.
-# nixpkgs-llvm-patched is excluded from CI for the same reason as
-# nixpkgs-llvm above.
+# nixpkgs-llvm-patched and nixpkgs-opencv-patched are excluded from CI
+# for the same reason as their unpatched packages above.
 verify_patch_incrementality() {
   local base="$1" patched="$2"
   nix build ".#$base" -o "result-$base-cold"

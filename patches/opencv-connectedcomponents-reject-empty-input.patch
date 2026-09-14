@@ -1,0 +1,18 @@
+commit e7652038ee793d450ced4a0942e3e56c223f26ed
+Author: Lazizbek Ergashev <lazerg2@gmail.com>
+Date:   Wed Sep 2 23:05:43 2026 +0500
+
+    imgproc: reject empty input in connected components
+
+diff --git a/modules/imgproc/src/connectedcomponents.cpp b/modules/imgproc/src/connectedcomponents.cpp
+index 065e871c5..dc25e5b9d 100644
+--- a/modules/imgproc/src/connectedcomponents.cpp
++++ b/modules/imgproc/src/connectedcomponents.cpp
+@@ -5650,6 +5650,7 @@ namespace cv{
+     template<typename StatsOp>
+     static
+     int connectedComponents_sub1(const cv::Mat& I, cv::Mat& L, int connectivity, int ccltype, StatsOp& sop){
++        CV_Assert(!I.empty());
+         CV_Assert(L.channels() == 1 && I.channels() == 1);
+         CV_Assert(connectivity == 8 || connectivity == 4);
+         CV_Assert(ccltype == CCL_SPAGHETTI || ccltype == CCL_BBDT || ccltype == CCL_SAUF || ccltype == CCL_BOLELLI || ccltype == CCL_GRANA || ccltype == CCL_WU || ccltype == CCL_DEFAULT);

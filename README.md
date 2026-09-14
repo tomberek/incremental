@@ -8,14 +8,26 @@ restoring, not the deciding.
 
 ## Results
 
+- **OpenCV** (`nixpkgs-opencv`, `pkgs.opencv4`, CMake): 99% real ccache
+  hits on a same-source rebuild, full build **27m26s → 6m14s (~4.4x)** —
+  the biggest absolute wall-clock win measured here.
 - **LLVM** (`nixpkgs-llvm`, `pkgs.llvmPackages.llvm`, CMake/Ninja,
   ~4200 translation units): 98% real ccache hits on a same-source
   rebuild, `buildPhase` itself **35m17s → 1m20s (~26x)**.
 - **Real single-file patches, not just same-source reruns**: applying
-  one small, real upstream commit to `nixpkgs-llvm` and restoring from
-  the *unpatched* build's cache still hits 97.9% (4075/4159) —
-  dropping by exactly the one file the patch touched, even at LLVM's
-  scale. Same pattern confirmed on jq, redis, tmux, python3, perl.
+  one small, real upstream commit to `nixpkgs-llvm`/`nixpkgs-opencv`
+  and restoring from the *unpatched* build's cache still hits
+  97.9%/98.9% — dropping by exactly the one file the patch touched,
+  even at this scale. Same pattern confirmed on jq, redis, tmux,
+  python3, perl. A header-touching patch (fmt, protobuf) costs far
+  more — 22-24% — a genuinely different, expected result, not a bug;
+  see "Real nixpkgs packages" below.
+- **A Haskell/GHC ecosystem that's safe by default**: unlike Cargo,
+  GHC's recompilation-avoidance (via Cabal's own `previousIntermediates`
+  mechanism) correctly detects real source changes under Nix's
+  epoch-normalized mtimes with no workaround needed — confirmed on
+  `pandoc-cli`, restoring a same-source cache skips recompiling every
+  one of its own modules.
 - **Found and fixed a real bug in NixOS/nix's own incremental build**:
   `nix-incremental` (the full `nix` CLI) silently never restored
   anything — two compounding key-mismatch bugs meant `--override-input
@@ -114,8 +126,12 @@ a plain derivation work anywhere instead.)
 `mkIncrementalGoPackage`, `mkIncrementalZigPackage`, `mkIncrementalSwiftPackage`, and
 `mkIncrementalRustPackage` bake in the right `cacheVars`/`phase` for
 those ecosystems (see "Examples in this repo" for why each needs what
-it needs). `mkIncrementalCcachePackage` does the same for ccache — one
-call site handles `ccacheEnv`'s setup/report shell and
+it needs). `mkIncrementalHaskellPackage` is different — it doesn't use
+`mkIncremental` at all, since nixpkgs' own Haskell builder already has
+a first-class incremental mechanism (`previousIntermediates`); it just
+turns that on and wires up `withCache`/`asCacheApp`, same shape as
+everything else. `mkIncrementalCcachePackage` does the same for
+ccache — one call site handles `ccacheEnv`'s setup/report shell and
 `passthru.withCache`; pass `autotools = true` to also layer on
 autoconf's `--cache-file`. For anything else, compose
 `mkIncremental`/`mkIncrementalAutotoolsPackage` directly.
@@ -154,6 +170,30 @@ for the same reason. `rust-staleness-self-test` (see
 `checks/README.md`) is what would catch a regression here: it
 restores a cache built from *different* source and asserts the binary
 isn't served stale.
+
+### Haskell (`.#haskell`, `pkgs.haskellPackages.pandoc-cli`)
+
+```
+$ nix build .#haskell
+$ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#haskell
+```
+
+Unlike every other ecosystem here, this one needed no restore script
+or staleness fix at all: nixpkgs' own Haskell builder already has a
+first-class incremental mechanism — pass `previousIntermediates` (a
+prior build's `intermediates` output) and it splices
+`dist/build` back in during `buildPhase`, before Cabal/GHC's own
+recompilation-avoidance decides what's stale. That check is content-
+and mtime-based like Cargo's, but — confirmed empirically, not
+assumed — correctly detects real changes under Nix's epoch-normalized
+mtimes, unlike Cargo. `mkIncrementalHaskellPackage` just turns the
+mechanism on via `haskell.lib.compose.overrideCabal` (the *only* layer
+that works — `doInstallIntermediates`/`enableSeparateIntermediatesOutput`
+are constructor args to `mkDerivation`, computed once inside
+nixpkgs' own builder before the final attrset exists, so a plain
+`.overrideAttrs` silently produces no `intermediates` output at all).
+Restoring a same-source cache skips compiling every one of pandoc's
+own modules — only the final relink runs.
 
 ### ccache (hello-ccache, c)
 
@@ -213,6 +253,7 @@ an estimate:
 | `nixpkgs-llvm` | ccache only (CMake/Ninja) | 98% | buildPhase 35m17s → 1m20s (~26x); overall 10816s → 2377s (~4.5x) |
 | `nixpkgs-fmt` | ccache only (CMake) | 98% | ~87s → ~12s (~7x) |
 | `nixpkgs-protobuf` | ccache only (CMake) | — | buildPhase ~6m cold; `doCheck` disabled (own test suite alone runs 15m+) |
+| `nixpkgs-opencv` | ccache only (CMake) | 99% | 27m26s → 6m14s (~4.4x) |
 
 ```
 $ nix build .#nixpkgs-jq
@@ -220,9 +261,9 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-jq
 ```
 
 (same for `nixpkgs-redis`/`nixpkgs-tmux`/`nixpkgs-python3`/
-`nixpkgs-perl`/`nixpkgs-llvm`/`nixpkgs-fmt`/`nixpkgs-protobuf`;
-`nixpkgs-llvm` isn't in CI — a cold build takes 35+ minutes on 22
-local cores.)
+`nixpkgs-perl`/`nixpkgs-llvm`/`nixpkgs-fmt`/`nixpkgs-protobuf`/
+`nixpkgs-opencv`; `nixpkgs-llvm` and `nixpkgs-opencv` aren't in CI —
+cold builds take 35+ and ~27 minutes respectively on 22 local cores.)
 
 `tmux` hits 100% but only gets ~1.6x, and `llvm`'s `buildPhase` speedup
 (~26x) doesn't carry through to its overall wall-clock (~4.5x) —
@@ -234,10 +275,10 @@ the package. `python3` hits the same pattern for a different reason:
 `postInstall` runs `python -m compileall` over the entire stdlib three
 times, pure bytecode compilation ccache never sees.
 
-`redis`/`perl`/`llvm`/`fmt`/`protobuf` are ccache-only (no
+`redis`/`perl`/`llvm`/`fmt`/`protobuf`/`opencv` are ccache-only (no
 `--cache-file`) because none has a real autoconf `./configure`: redis
 is a plain Makefile, perl's own `Configure` isn't autoconf, llvm/fmt/
-protobuf are CMake. `python3` *does*
+protobuf/opencv are CMake. `python3` *does*
 have a real `./configure`, but its nixpkgs derivation restricts
 `outputChecks.out` from referencing `openssl-dev`; a composed
 `incremental` output inherits that same restriction, and
@@ -268,13 +309,14 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-jq-pa
 | `nixpkgs-llvm-patched` | one function, `MemoryDependenceAnalysis.cpp` | 4075/4159 (97.9%) | 98.0% unpatched, ~4200 TUs |
 | `nixpkgs-fmt-patched` | header fix, `include/fmt/format.h` | 13/54 (24%) | 98% unpatched — every `.cc` includes the header |
 | `nixpkgs-protobuf-patched` | leaf `.cc` + its header, `repeated_field.{cc,h}` | 80/360 (22%) | — same "widely-included header" cost, at 10x the scale |
+| `nixpkgs-opencv-patched` | one line, `connectedcomponents.cpp` | 1855/1875 (98.9%) | 99.0% unpatched — a narrow leaf fix, not a header |
 
 A header change costs proportionally more than a leaf-file one — not
 a bug, the same tradeoff any C/C++ build (cached or not) makes:
 `fmt`/`protobuf`'s patches touch a header every translation unit
 includes, so most of the build recompiles regardless of caching,
-while `jq`/`llvm`'s patches touch one file only their own translation
-unit depends on.
+while `jq`/`llvm`/`opencv`'s patches touch one file only their own
+translation unit depends on.
 
 Not every C package benefits — tried and dropped, each confirmed by
 measurement, not guessed from reading the build:

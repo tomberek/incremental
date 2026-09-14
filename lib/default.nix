@@ -31,6 +31,9 @@ let
       mkWithCache
       ;
   };
+  mkIncrementalHaskellPackage = import ./mk-incremental-haskell-package.nix {
+    inherit inputs mkWithCache mkAsCacheApp;
+  };
   ccacheEnv = import ./ccache-env.nix;
   mkIncrementalCcachePackage = import ./mk-incremental-ccache-package.nix {
     inherit
@@ -55,6 +58,7 @@ in
     mkIncrementalZigPackage
     mkIncrementalSwiftPackage
     mkIncrementalRustPackage
+    mkIncrementalHaskellPackage
     ccacheEnv
     mkIncrementalCcachePackage
     mkIncrementalNixComponents

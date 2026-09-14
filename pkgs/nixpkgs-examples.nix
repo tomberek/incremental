@@ -65,6 +65,15 @@
 # disabled here: protobuf's own test suite alone runs well past 15
 # minutes, dwarfing the ~6-minute build it would be validating.
 #
+# opencv (ccacheOnly — CMake) is the biggest "go bigger" C++ test so
+# far short of llvm itself: 99% real ccache hits (1856/1875), cold
+# build 27m26s -> warm 6m14s (~4.4x). Its own patch
+# (opencv-connectedcomponents-reject-empty-input.patch) is a real,
+# narrow single-line leaf-file fix (one CV_Assert in
+# connectedcomponents.cpp), the jq/tmux shape rather than fmt/
+# protobuf's header-touching one — expect a high hit rate restoring
+# from the unpatched cache, not the 22-24% those saw.
+#
 # Tried and dropped as examples: curl hits 100% in ccache but shows
 # no real speedup — its build time is dominated by man-page
 # rendering/install, not compilation, so ccache has nothing to save.
@@ -213,6 +222,12 @@ let
       });
       ccacheOnly = true;
       patch = ../patches/protobuf-repeated-field-self-merge-abort.patch;
+    }
+    {
+      name = "nixpkgs-opencv";
+      drv = pkgs.opencv4;
+      ccacheOnly = true;
+      patch = ../patches/opencv-connectedcomponents-reject-empty-input.patch;
     }
   ];
 in
