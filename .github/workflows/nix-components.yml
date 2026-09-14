@@ -12,4 +12,8 @@ jobs:
         with:
           fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@main
+      - uses: cachix/cachix-action@v15
+        with:
+          name: dynamicderivations
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
       - run: nix build .#nix-incremental .#nix-all-components -L
