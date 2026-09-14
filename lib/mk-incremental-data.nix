@@ -55,9 +55,34 @@ in
   # ./configure re-run propagates the corruption straight into a
   # freshly generated Makefile (confirmed: "mkdir: No such file or
   # directory" pointing at a nuke-refs placeholder hash).
+  #
+  # debugDir gets its own, *unconditional* nuke pass — not gated by
+  # `nuke` like the manifest pass above. `nuke` exists to skip nuking
+  # a cache tool's own manifest when the tool manages that directory
+  # itself (mkIncrementalCcachePackage's default, "ccache manages its
+  # own dir"); debugDir is different — this repo, not the tool,
+  # controls its lifecycle (ccacheEnv always writes real compiler
+  # command lines there whenever CCACHE_DEBUG is set, regardless of
+  # `nuke`), so skipping it here was never justified by that
+  # reasoning. It was also skipped entirely whenever keepIncremental
+  # is false: `dir` (what the old code actually nuked) is a throwaway
+  # scratch location outside any output in that case, but debugDir is
+  # still $incremental/debug-logs — inside the *kept* output — so a
+  # `find ${dir}` pass covered nothing there. This was a real,
+  # deterministic bug (not the race it looked like): every warm
+  # rebuild via `--override-input cache` sets keepIncremental=false,
+  # so debug-logs was never nuked in that case at all. Confirmed
+  # directly on nixpkgs-jq — restoring from a cold build's cache and
+  # rebuilding left real, un-nuked store-path hashes (gcc, glibc,
+  # ccache, the package's own store paths) in freshly-written
+  # debug-logs files, with or without `nuke`. nixpkgs-python3's
+  # disallowedReferences check is what turned this into a build
+  # failure; every other ccache package (including nuke = false ones
+  # like hello-ccache/c) has the identical leak, just without a check
+  # strict enough to catch it.
   nukeScript =
-    if keepIncremental && nuke then
-      "find ${dir} -type f -not -name config.cache -exec nuke-refs {} +\n"
-    else
-      "";
+    lib.optionalString keepIncremental (
+      lib.optionalString nuke "find ${dir} -type f -not -name config.cache -exec nuke-refs {} +\n"
+    )
+    + "find ${debugDir} -type f -exec nuke-refs {} + 2>/dev/null || true\n";
 }

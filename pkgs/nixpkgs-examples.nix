@@ -17,11 +17,11 @@
 # (2m -> 1m13s): most of its wall-clock is autoconf's own
 # `./configure` checks and a single-threaded final link, neither of
 # which ccache touches — a real example of "100% cache hits" not
-# implying "proportionally faster", not a bug. python3 (ccacheOnly,
-# noDebug — see below) hits 99% but only gets ~1.2x (4m16s -> 3m24s):
-# postInstall runs `python -m compileall` over the entire stdlib
-# three times (plain/-O/-OO), pure Python bytecode compilation ccache
-# never sees, on every build regardless of what changed.
+# implying "proportionally faster", not a bug. python3 (ccacheOnly)
+# hits 99% but only gets ~1.2x (4m16s -> 3m24s): postInstall runs
+# `python -m compileall` over the entire stdlib three times
+# (plain/-O/-OO), pure Python bytecode compilation ccache never sees,
+# on every build regardless of what changed.
 #
 # perl (ccacheOnly — Configure isn't autoconf, no --cache-file) hits
 # 99% and gets ~1.6x (2m57s -> 1m48s): its -Dprefix=<placeholder>
@@ -39,9 +39,10 @@
 # "high hit rate doesn't mean proportional wall-clock" lesson as
 # tmux, just at LLVM's scale. nuke-refs also has real work to do
 # here: thousands of ccache debug-log files, more than python3's
-# scale, and it still completed cleanly (no disallowed-reference
-# failures) — the python3 debug-log leak seems to have been something
-# specific to that build, not something proportional to file count.
+# scale, and it still completed cleanly — llvm's test suite runs in
+# checkPhase (before postInstall), not installCheckPhase like
+# python3's `make check`, so it never hit the debug-log nuke-timing
+# bug described in lib/mk-incremental.nix's nukeDebugLogsPhase.
 #
 # fmt (ccacheOnly — CMake, no ./configure at all) is the first CMake
 # C++ example rather than C: 98% real hits (53/54), buildPhase-level
@@ -110,9 +111,8 @@ let
   #   confirmed via empty nativeBuildInputs/no autoreconf-hook; llvm:
   #   CMake/Ninja), so --cache-file would be silently useless (or,
   #   for perl/llvm, not even understood).
-  # - ccacheOnly + noDebug (python3): *does* have a real ./configure,
-  #   but its nixpkgs derivation declares
-  #   outputChecks.out.disallowedReferences on openssl-dev — a
+  # - ccacheOnly + a real ./configure (python3): its nixpkgs derivation
+  #   declares outputChecks.out.disallowedReferences on openssl-dev — a
   #   composed `incremental` output inherits the same check
   #   (confirmed: nix derivation eval shows outputChecks.incremental
   #   is identical to outputChecks.out) — and --with-openssl=<path>-dev
@@ -120,51 +120,33 @@ let
   #   records that path in its cached check results, tripping the
   #   disallowed-reference check at build time ("output ... is not
   #   allowed to refer to ..."). Dropping --cache-file (ccacheOnly)
-  #   avoids *that* conflict — but python3's scale (hundreds of
-  #   autoconf conftest probes during configurePhase) surfaced a
-  #   second, distinct one: ccacheEnv's CCACHE_DEBUG=1 writes every
-  #   conftest compile's full command line (including -I<path>/include)
-  #   verbatim to $incremental/debug-logs, and confirmed by direct
-  #   grep for the exact disallowed store-path hash: those references
-  #   survived a nuke-refs pass at this scale even though the
-  #   identical mechanism worked on a synthetic reproduction of the
-  #   same file content (root cause not fully isolated — plausibly a
-  #   write/flush race between ccache's debug-log writers and the
-  #   nuke-refs pass's directory listing). Disabling ccacheEnv's debug
-  #   logging for this package (unset right after env.setup)
-  #   sidesteps needing to scrub those files at all — confirmed fix,
-  #   not a guess: 99% real hits, no disallowed-reference error,
-  #   reproduced twice.
+  #   avoids that conflict. python3's scale (hundreds of autoconf
+  #   conftest probes during configurePhase, plus its own `make check`
+  #   in installCheckPhase) also surfaced a real bug in the debug-log
+  #   nuking itself — see lib/mk-incremental-data.nix's nukeScript and
+  #   lib/mk-incremental.nix's nukeDebugLogsPhase — now fixed
+  #   structurally rather than by disabling debug logging here.
   mkNixpkgsExample =
     {
       name,
       drv,
       ccacheOnly ? false,
-      noDebug ? false,
     }:
-    let
-      base = mkIncrementalCcachePackage {
-        inherit name system pkgs;
-        autotools = !ccacheOnly;
-        phase = "postPatch"; # always runs, even with no configurePhase
-        # Unlike hello-ccache, these builds are big enough that
-        # ccache's cache dir picks up real store-path references
-        # (e.g. from debug info) — without nuke-refs recursing into
-        # every level, that creates a same-derivation cycle between
-        # the incremental and main outputs (confirmed: dropping this
-        # reproduces "cycle detected ... in the references of output
-        # 'bin' from output 'incremental'"). See
-        # lib/mk-incremental-data.nix's nukeScript.
-        nuke = true;
-        drv = drv.override { stdenv = pkgs.ccacheStdenv; };
-      };
-    in
-    if noDebug then
-      base.overrideAttrs (old: {
-        postPatch = old.postPatch + "unset CCACHE_DEBUG CCACHE_DEBUGDIR\n";
-      })
-    else
-      base;
+    mkIncrementalCcachePackage {
+      inherit name system pkgs;
+      autotools = !ccacheOnly;
+      phase = "postPatch"; # always runs, even with no configurePhase
+      # Unlike hello-ccache, these builds are big enough that
+      # ccache's cache dir picks up real store-path references
+      # (e.g. from debug info) — without nuke-refs recursing into
+      # every level, that creates a same-derivation cycle between
+      # the incremental and main outputs (confirmed: dropping this
+      # reproduces "cycle detected ... in the references of output
+      # 'bin' from output 'incremental'"). See
+      # lib/mk-incremental-data.nix's nukeScript.
+      nuke = true;
+      drv = drv.override { stdenv = pkgs.ccacheStdenv; };
+    };
 
   # Each entry's `-patched` sibling applies one small, real upstream
   # commit (patches/, one per package — see the commit each was
@@ -194,7 +176,6 @@ let
       name = "nixpkgs-python3";
       drv = pkgs.python3;
       ccacheOnly = true;
-      noDebug = true;
       patch = ../patches/python3-struct-pack-empty-pascal.patch;
     }
     {
