@@ -8,6 +8,9 @@ on:
 jobs:
   flake-check:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -19,3 +22,15 @@ jobs:
           authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
       - run: nix flake check -L
       - run: bash scripts/verify-override-input.sh
+      - run: nix build .#golang -L
+      # Comments a link on the PR that boots .#golang in the browser,
+      # reading store paths straight from the dynamicderivations cache
+      # pushed above — nothing extra published, just a reviewer-facing
+      # "try it" shortcut. No-ops (and doesn't fail the job) on a fork PR,
+      # whose token can't post comments.
+      - uses: fzakaria/trynix@v1
+        if: github.event_name == 'pull_request'
+        with:
+          cache: https://dynamicderivations.cachix.org
+          publicKey: dynamicderivations.cachix.org-1:AmDuQASmWJsVYB/r0TGTZnQSnoxPzKP8ijfGw/6aT3k=
+          attrs: .#golang
