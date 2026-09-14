@@ -13,14 +13,6 @@
     export CCACHE_UMASK=007
     export CCACHE_NOINODECACHE=1
     export CCACHE_DEBUG=1
-    # Level 2 (ccache's default once CCACHE_DEBUG is set) also dumps three
-    # binary ccache-input-* files per compile alongside the text log —
-    # `report` below only ever greps the text log's "Result:" line, so
-    # those binary dumps are pure overhead: more bytes for nuke-refs to
-    # scrub, and (suspected, see nixpkgs-examples.nix's python3 notes) a
-    # wider surface for a disallowed store-path reference to leak through
-    # before nuke-refs runs. Level 1 writes only the text log.
-    export CCACHE_DEBUGLEVEL=1
     export CCACHE_DEBUGDIR="${debugDir}"
     ${pkgs.ccache}/bin/ccache --dir "${dir}" --zero-stats > /dev/null
   '';

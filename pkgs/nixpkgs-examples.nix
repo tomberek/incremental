@@ -17,11 +17,11 @@
 # (2m -> 1m13s): most of its wall-clock is autoconf's own
 # `./configure` checks and a single-threaded final link, neither of
 # which ccache touches — a real example of "100% cache hits" not
-# implying "proportionally faster", not a bug. python3 (ccacheOnly)
-# hits 99% but only gets ~1.2x (4m16s -> 3m24s): postInstall runs
-# `python -m compileall` over the entire stdlib three times
-# (plain/-O/-OO), pure Python bytecode compilation ccache never sees,
-# on every build regardless of what changed.
+# implying "proportionally faster", not a bug. python3 (ccacheOnly,
+# noDebug — see below) hits 99% but only gets ~1.2x (4m16s -> 3m24s):
+# postInstall runs `python -m compileall` over the entire stdlib
+# three times (plain/-O/-OO), pure Python bytecode compilation ccache
+# never sees, on every build regardless of what changed.
 #
 # perl (ccacheOnly — Configure isn't autoconf, no --cache-file) hits
 # 99% and gets ~1.6x (2m57s -> 1m48s): its -Dprefix=<placeholder>
@@ -103,43 +103,68 @@
 # build. Structurally identical to emacs's libgccjit blind spot, just
 # with GCC compiling itself instead of Lisp.
 let
-  # One example ends up in one of two shapes:
+  # One example ends up in one of three shapes:
   # - autotools (jq, tmux): real ./configure, gets --cache-file too.
-  # - ccacheOnly (redis, python3, perl, llvm): no autoconf ./configure
-  #   at all (redis: plain Makefile; perl: its own Configure, not
-  #   autoconf — confirmed via empty nativeBuildInputs/no
-  #   autoreconf-hook; llvm: CMake/Ninja), so --cache-file would be
-  #   silently useless (or, for perl/llvm, not even understood).
-  #   python3 *does* have a real ./configure, but its nixpkgs
-  #   derivation declares outputChecks.out.disallowedReferences on
-  #   openssl-dev — a composed `incremental` output inherits the same
-  #   check (confirmed: nix derivation eval shows
-  #   outputChecks.incremental is identical to outputChecks.out) —
-  #   and --with-openssl=<path>-dev is a literal configureFlag, so
-  #   config.cache legitimately records that path in its cached check
-  #   results, tripping the disallowed-reference check at build time.
-  #   Dropping --cache-file (ccacheOnly) avoids that conflict.
+  # - ccacheOnly (redis, perl, llvm): no autoconf ./configure at all
+  #   (redis: plain Makefile; perl: its own Configure, not autoconf —
+  #   confirmed via empty nativeBuildInputs/no autoreconf-hook; llvm:
+  #   CMake/Ninja), so --cache-file would be silently useless (or,
+  #   for perl/llvm, not even understood).
+  # - ccacheOnly + noDebug (python3): *does* have a real ./configure,
+  #   but its nixpkgs derivation declares
+  #   outputChecks.out.disallowedReferences on openssl-dev — a
+  #   composed `incremental` output inherits the same check
+  #   (confirmed: nix derivation eval shows outputChecks.incremental
+  #   is identical to outputChecks.out) — and --with-openssl=<path>-dev
+  #   is a literal configureFlag, so config.cache legitimately
+  #   records that path in its cached check results, tripping the
+  #   disallowed-reference check at build time ("output ... is not
+  #   allowed to refer to ..."). Dropping --cache-file (ccacheOnly)
+  #   avoids *that* conflict — but python3's scale (hundreds of
+  #   autoconf conftest probes during configurePhase) surfaced a
+  #   second, distinct one: ccacheEnv's CCACHE_DEBUG=1 writes every
+  #   conftest compile's full command line (including -I<path>/include)
+  #   verbatim to $incremental/debug-logs, and confirmed by direct
+  #   grep for the exact disallowed store-path hash: those references
+  #   survived a nuke-refs pass at this scale even though the
+  #   identical mechanism worked on a synthetic reproduction of the
+  #   same file content (root cause not fully isolated — plausibly a
+  #   write/flush race between ccache's debug-log writers and the
+  #   nuke-refs pass's directory listing). Disabling ccacheEnv's debug
+  #   logging for this package (unset right after env.setup)
+  #   sidesteps needing to scrub those files at all — confirmed fix,
+  #   not a guess: 99% real hits, no disallowed-reference error,
+  #   reproduced twice.
   mkNixpkgsExample =
     {
       name,
       drv,
       ccacheOnly ? false,
+      noDebug ? false,
     }:
-    mkIncrementalCcachePackage {
-      inherit name system pkgs;
-      autotools = !ccacheOnly;
-      phase = "postPatch"; # always runs, even with no configurePhase
-      # Unlike hello-ccache, these builds are big enough that
-      # ccache's cache dir picks up real store-path references
-      # (e.g. from debug info) — without nuke-refs recursing into
-      # every level, that creates a same-derivation cycle between
-      # the incremental and main outputs (confirmed: dropping this
-      # reproduces "cycle detected ... in the references of output
-      # 'bin' from output 'incremental'"). See
-      # lib/mk-incremental-data.nix's nukeScript.
-      nuke = true;
-      drv = drv.override { stdenv = pkgs.ccacheStdenv; };
-    };
+    let
+      base = mkIncrementalCcachePackage {
+        inherit name system pkgs;
+        autotools = !ccacheOnly;
+        phase = "postPatch"; # always runs, even with no configurePhase
+        # Unlike hello-ccache, these builds are big enough that
+        # ccache's cache dir picks up real store-path references
+        # (e.g. from debug info) — without nuke-refs recursing into
+        # every level, that creates a same-derivation cycle between
+        # the incremental and main outputs (confirmed: dropping this
+        # reproduces "cycle detected ... in the references of output
+        # 'bin' from output 'incremental'"). See
+        # lib/mk-incremental-data.nix's nukeScript.
+        nuke = true;
+        drv = drv.override { stdenv = pkgs.ccacheStdenv; };
+      };
+    in
+    if noDebug then
+      base.overrideAttrs (old: {
+        postPatch = old.postPatch + "unset CCACHE_DEBUG CCACHE_DEBUGDIR\n";
+      })
+    else
+      base;
 
   # Each entry's `-patched` sibling applies one small, real upstream
   # commit (patches/, one per package — see the commit each was
@@ -169,6 +194,7 @@ let
       name = "nixpkgs-python3";
       drv = pkgs.python3;
       ccacheOnly = true;
+      noDebug = true;
       patch = ../patches/python3-struct-pack-empty-pascal.patch;
     }
     {
