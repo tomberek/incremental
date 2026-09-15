@@ -48,6 +48,20 @@ restoring, not the deciding.
   `emacs` (1% hits — native-lisp `.eln` bypasses `$CC` via
   `libgccjit`), `gcc` (0/0 *invocations* — bootstraps its own compiler
   and never calls back through the ccache wrapper).
+- **Found and fixed a real bug in this repo's own debug-log nuking**:
+  ccache's `CCACHE_DEBUG=1` writes every compile's full command line
+  (`-I<path>`s included) to `$incremental/debug-logs`, and the nuke-refs
+  pass meant to scrub those files had two compounding gaps — it was
+  gated on `keepIncremental`, so it never ran at all on a warm rebuild
+  (every `--override-input cache` build), and it ran from `postInstall`,
+  before `installCheckPhase`'s test suite could write more logs of its
+  own. `nixpkgs-python3`'s `disallowedReferences` check is what
+  surfaced it as a build failure; every other ccache package had the
+  same leak, just without a check strict enough to catch it. Fixed by
+  making the nuke pass unconditional and moving it to a dedicated
+  `postPhases` phase that runs after everything else — confirmed via
+  direct grep for real store-path hashes across the entire built
+  output, not just build-log text.
 
 ## Using this as a library from another flake
 
@@ -260,7 +274,7 @@ an estimate:
 | `nixpkgs-jq` | autotools + ccache | 95% | 38s → 22s (~1.7x) |
 | `nixpkgs-redis` | ccache only (no `./configure`) | 96% | 4m46s → 42s (~6.8x) |
 | `nixpkgs-tmux` | autotools + ccache | 100% | 2m → 1m13s (~1.6x) |
-| `nixpkgs-python3` | ccache only, debug logging disabled | 99% | 4m16s → 3m24s (~1.2x) |
+| `nixpkgs-python3` | ccache only | 99% | 4m16s → 3m24s (~1.2x) |
 | `nixpkgs-perl` | ccache only (`Configure`, not autoconf) | 99% | 2m57s → 1m48s (~1.6x) |
 | `nixpkgs-llvm` | ccache only (CMake/Ninja) | 98% | buildPhase 35m17s → 1m20s (~26x); overall 10816s → 2377s (~4.5x) |
 | `nixpkgs-fmt` | ccache only (CMake) | 98% | ~87s → ~12s (~7x) |
@@ -302,11 +316,7 @@ have a real `./configure`, but its nixpkgs derivation restricts
 `incremental` output inherits that same restriction, and
 `--with-openssl=<path>-dev` in `configureFlags` means `config.cache`
 would legitimately record that path, tripping the check. Dropping
-`--cache-file` avoids that — but at python3's scale, `ccacheEnv`'s own
-`CCACHE_DEBUG=1` debug logs leaked the same disallowed path through a
-different route (hundreds of autoconf `conftest` probes, each logging
-its full compile command line); disabling debug logging for this one
-package sidesteps needing to scrub those files at all.
+`--cache-file` avoids that.
 
 **Proving incrementality under a real code change, not just a
 same-source rerun:** every `nixpkgs-*-patched` variant applies one

@@ -49,3 +49,6 @@ in
 // import ./nixpkgs-kubernetes.nix {
   inherit system pkgs mkIncrementalGoPackage;
 }
+// import ./nixpkgs-nushell.nix {
+  inherit system pkgs mkIncrementalRustPackage;
+}
