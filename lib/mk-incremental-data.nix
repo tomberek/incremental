@@ -33,8 +33,37 @@ in
     lib.optionalString (!keepIncremental) "mkdir -p $incremental\n"
     + ''
       mkdir -p empty
+      # Nix normalizes every file in a store output to the same fixed
+      # epoch mtime during build finalization. Naive `cp -r` (no
+      # --preserve=timestamps) stamps each file with the real wall-clock
+      # time *at the moment cp copies it*, in whatever order it walks
+      # the tree, not the actual build/dependency order — cargo's
+      # cross-unit staleness check (independent of -Zchecksum-freshness,
+      # which only covers per-file source rebuild-dirty checks) compares
+      # a dependency's mtime against its dependent's and recompiles if
+      # the dependency looks newer, so that copy-order noise alone
+      # caused spurious recompiles. But `--preserve=timestamps` isn't
+      # right either: it keeps every restored file at the frozen epoch
+      # mtime, which is then *always older* than the vendor/source files
+      # this same build already unpacked earlier (with a real "now"
+      # timestamp) — cargo's build-script staleness check compares a
+      # build script's tracked source against its own recorded output
+      # sentinel, so an epoch-stamped sentinel always looks stale next
+      # to a freshly-unpacked source. Confirmed both failure modes via
+      # CARGO_LOG=cargo::core::compiler::fingerprint=trace on
+      # nixpkgs-nushell. `find -exec touch {} +` isn't right either:
+      # `+` batches arguments to stay under ARG_MAX, so a restored tree
+      # large enough to need more than one touch invocation (confirmed:
+      # nushell's does) gets more than one "now" — the same relative-
+      # order noise as the original bug, just at finer grain. Capturing
+      # one timestamp up front and passing it explicitly via `touch -t`
+      # ties every batch, and therefore every restored file, to the
+      # exact same instant regardless of how many touch invocations
+      # `find` needs.
       cp -r ${prevIncremental} ${dir}
       chmod -R +w ${dir}
+      now=$(date +%Y%m%d%H%M.%S)
+      find ${dir} -exec touch -t "$now" {} +
       mkdir -p ${debugDir}
     ''
     + lib.concatMapStrings (v: "export ${v}=${dir}\n") cacheVars;
