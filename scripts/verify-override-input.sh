@@ -3,7 +3,10 @@
 # workflow documented in the README actually works, for every example that
 # has editable source. This is a different thing from `checks` in flake.nix:
 # those exercise `withCache` (the library API); this exercises the CLI
-# workflow a real user copy-pastes from the README.
+# workflow a real user copy-pastes from the README. On CI, also renders a
+# markdown summary table (package/check/result) to the run page via
+# $GITHUB_STEP_SUMMARY, so a reviewer can see every ccache hit rate without
+# opening the job log — see summary_row below.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -18,14 +21,27 @@ fi
 failures=0
 trap 'git checkout -- "${EDIT_FILES[@]}" 2>/dev/null; rm -f foo.db; rm -rf result*' EXIT
 
+# Rows for the GitHub Actions step summary (a markdown table rendered
+# on the run page itself — see the bottom of this script). Kept as a
+# plain array, not written incrementally, so a local run pays no cost
+# beyond a few string appends; the actual write is a single append to
+# $GITHUB_STEP_SUMMARY at the very end, guarded on that var being set
+# (unset outside Actions, so this is a no-op locally).
+SUMMARY_ROWS=()
+summary_row() {
+  SUMMARY_ROWS+=("| $1 | $2 | $3 |")
+}
+
 check() {
   local name="$1" expected="$2" actual="$3"
   if [[ "$actual" == *"$expected"* ]]; then
     echo "override-input-verify[$name]: OK (found \"$expected\")"
+    summary_row "$name" "sanity edit" "✅ marker found in rebuilt binary"
   else
     echo "override-input-verify[$name]: FAILED — expected \"$expected\" in output, got:" >&2
     echo "$actual" >&2
     failures=$((failures + 1))
+    summary_row "$name" "sanity edit" "❌ marker missing — see job log"
   fi
 }
 
@@ -104,6 +120,7 @@ verify_no_recompile() {
     echo "override-input-verify[$name]: FAILED — build itself failed:" >&2
     echo "$log" >&2
     failures=$((failures + 1))
+    summary_row "$name" "no-recompile" "❌ build failed — see job log"
     return
   fi
   local last_setup_line target_log
@@ -113,8 +130,10 @@ verify_no_recompile() {
     echo "override-input-verify[$name]: FAILED — expected no module recompiles, got:" >&2
     echo "$target_log" | grep -P '^\S+> \[\d+ of \d+\] Compiling' >&2
     failures=$((failures + 1))
+    summary_row "$name" "no-recompile" "❌ unexpected module recompile — see job log"
   else
     echo "override-input-verify[$name]: OK (no module recompiles restoring from same-source cache)"
+    summary_row "$name" "no-recompile" "✅ no module recompiles"
   fi
 }
 
@@ -144,16 +163,20 @@ verify_ccache_hits() {
     echo "override-input-verify[$name]: FAILED — build itself failed:" >&2
     echo "$log" >&2
     failures=$((failures + 1))
+    summary_row "$name" "same-source rebuild" "❌ build failed — see job log"
     return
   fi
-  local hits
+  local hits report_line
   hits=$(echo "$log" | { grep -oP "ccache\[$name\]: \K[0-9]+(?=/[0-9]+ hits)" || true; } | tail -1)
+  report_line=$(echo "$log" | { grep -oP "ccache\[$name\]: \K[0-9]+/[0-9]+ hits \([0-9]+%\)" || true; } | tail -1)
   if [ "${hits:-0}" -gt 0 ]; then
     echo "override-input-verify[$name]: OK ($hits ccache hits)"
+    summary_row "$name" "same-source rebuild" "✅ ${report_line:-$hits hits}"
   else
     echo "override-input-verify[$name]: FAILED — expected a nonzero ccache hit count, got:" >&2
     echo "$log" >&2
     failures=$((failures + 1))
+    summary_row "$name" "same-source rebuild" "❌ 0 hits — see job log"
   fi
 }
 
@@ -203,16 +226,20 @@ verify_patch_incrementality() {
     echo "override-input-verify[$patched]: FAILED — build itself failed:" >&2
     echo "$log" >&2
     failures=$((failures + 1))
+    summary_row "$patched" "single-file patch, restored from $base" "❌ build failed — see job log"
     return
   fi
-  local hits
+  local hits report_line
   hits=$(echo "$log" | { grep -oP "ccache\[$base\]: \K[0-9]+(?=/[0-9]+ hits)" || true; } | tail -1)
+  report_line=$(echo "$log" | { grep -oP "ccache\[$base\]: \K[0-9]+/[0-9]+ hits \([0-9]+%\)" || true; } | tail -1)
   if [ "${hits:-0}" -gt 0 ]; then
     echo "override-input-verify[$patched]: OK ($hits ccache hits restoring from unpatched $base)"
+    summary_row "$patched" "single-file patch, restored from $base" "✅ ${report_line:-$hits hits}"
   else
     echo "override-input-verify[$patched]: FAILED — expected a nonzero ccache hit count, got:" >&2
     echo "$log" >&2
     failures=$((failures + 1))
+    summary_row "$patched" "single-file patch, restored from $base" "❌ 0 hits — see job log"
   fi
 }
 
@@ -223,6 +250,20 @@ verify_patch_incrementality nixpkgs-python3 nixpkgs-python3-patched
 verify_patch_incrementality nixpkgs-perl nixpkgs-perl-patched
 verify_patch_incrementality nixpkgs-fmt nixpkgs-fmt-patched
 verify_patch_incrementality nixpkgs-protobuf nixpkgs-protobuf-patched
+
+# $GITHUB_STEP_SUMMARY is unset outside Actions, so this is a no-op
+# locally. Written unconditionally (before the failure exit below) so
+# a failing run still gets a summary table showing which package
+# failed, not just the ones that got that far.
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  {
+    echo "## override-input-verify"
+    echo
+    echo "| package | check | result |"
+    echo "|---|---|---|"
+    printf '%s\n' "${SUMMARY_ROWS[@]}"
+  } >>"$GITHUB_STEP_SUMMARY"
+fi
 
 if [ "$failures" -gt 0 ]; then
   echo "override-input-verify: $failures check(s) failed" >&2
