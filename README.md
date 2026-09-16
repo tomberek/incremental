@@ -375,8 +375,8 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-jq-pa
 |---|---|---|---|
 | `nixpkgs-jq-patched` | one line, `src/main.c` | 23/24 (95%) | same 95% |
 | `nixpkgs-llvm-patched` | one function, `MemoryDependenceAnalysis.cpp` | 4075/4159 (97.9%) | 98.0% unpatched, ~4200 TUs |
-| `nixpkgs-fmt-patched` | header fix, `include/fmt/format.h` | 13/54 (24%) | 98% unpatched — every `.cc` includes the header |
-| `nixpkgs-protobuf-patched` | leaf `.cc` + its header, `repeated_field.{cc,h}` | 80/360 (22%) | — same "widely-included header" cost, at 10x the scale |
+| `nixpkgs-fmt-patched` | header fix, `include/fmt/format.h` | 17-20/54 (31-37%, varies by run) | 98% unpatched — every `.cc` includes the header |
+| `nixpkgs-protobuf-patched` | leaf `.cc` + its header, `repeated_field.{cc,h}` | 104/360 (29%) on CI, 100/360 (27%) measured locally | — same "widely-included header" cost, at 10x the scale |
 | `nixpkgs-opencv-patched` | one line, `connectedcomponents.cpp` | 1855/1875 (98.9%) | 99.0% unpatched — a narrow leaf fix, not a header |
 | `nixpkgs-kubernetes-patched` | one leaf file, `cmd/kubeadm/.../config.go` | — (Go, no hits) | 4m49s vs. 4m17s same-source — the other 5 built components weren't invalidated |
 | `nixpkgs-nushell-patched` | one leaf file + its own test, `crates/nu-command/src/filesystem/umkdir.rs` | 584/588 unchanged (99.3%) | only the patched crate and its 3 dependents (`nu-cli`, `nu-lsp`, `nu`) recompiled |
@@ -387,6 +387,16 @@ a bug, the same tradeoff any C/C++ build (cached or not) makes:
 includes, so most of the build recompiles regardless of caching,
 while `jq`/`llvm`/`opencv`'s patches touch one file only their own
 translation unit depends on.
+
+`fmt`/`protobuf`'s exact hit counts vary between machines — CI
+(`ubuntu-latest`, 4 cores) and a many-core local machine reliably
+disagree (`fmt-patched`: 17-20/54, ~31-37%, on CI vs. 13/54, 24%,
+measured locally; `protobuf-patched`: 104/360, 29%, on CI —
+consistent across every run checked — vs. 100/360, 27%, locally).
+Confirmed not a regression from anything in this repo: the same gap
+already existed in the very first CI run after these packages were
+added, before any later change touched the caching machinery — see
+"What's safe to cache" below for what's actually going on.
 
 Not every C package benefits — tried and dropped, each confirmed by
 measurement, not guessed from reading the build:
@@ -510,6 +520,35 @@ Content-addressed caches are safe to restore this way: ccache keys on
 preprocessed source + flags, Go/Zig's build caches similarly,
 autoconf's `config.cache` stores check results with no path baked in.
 Cargo's isn't (mtime-based) — see Rust above.
+
+`fmt`/`protobuf`'s hit-rate percentages (above) aren't as reproducible
+as the others, and the reason is a genuine ccache write race, not a
+correctness bug — confirmed with `CCACHE_DEBUG=1`'s per-file logs,
+not guessed. fmt's own `test/CMakeLists.txt` compiles the same helper
+source (`test/util.cc`, shared with `test-main.cc`/`gtest-extra.cc`)
+into 4 separate `HEADER_ONLY` test executables that never share a
+library, each an independent build-graph node ninja can schedule
+concurrently. Under high parallelism (confirmed on a 22-core machine,
+`--cores 22`), all 4 of those compiles started within 64ms of each
+other, each found no existing manifest entry (nothing had populated
+it yet) and each wrote its own — one hit would collapse to 3, but a
+race meant 4 misses instead, no compile actually invalidated. Forcing
+the build fully serial (`--cores 1 --max-jobs 1`) leaves enough time
+for the first compile's write to land before the next starts, so 3 of
+the 4 hit — this is exactly why local (many-core) runs report fewer
+hits than a small sweep with fewer cores, and why CI's 4-core runner
+consistently lands in between. Every other package here (`jq`,
+`redis`, `python3`, `perl`, `llvm`, `opencv`, `kubernetes`, `nushell`)
+reproduces exactly between CI and local runs because none of them
+compile the identical translation unit into more than one target —
+this is specific to fmt's (and, by the same shape, protobuf's) own
+build-graph structure, not anything in this repo's caching layer.
+Not something worth working around here: the correctness of the
+restored build is identical either way, only the reported percentage
+moves, and a real fix (deduplicating fmt's own `HEADER_ONLY` targets
+onto a shared library, or ccache serializing first-write races across
+processes) belongs upstream in fmt/ccache, not in this restore
+mechanism.
 
 Caching `./configure`'s actual *output* — `config.status`, the
 generated `Makefile`, `config.h` — isn't safe and isn't done here.
