@@ -16,6 +16,14 @@ restoring, not the deciding.
   `cmd/` components in one module): full build **14m43s → 4m17s
   (~3.4x)** on a same-source rebuild — the biggest Go package tried
   here, restoring `$GOCACHE` instead of ccache.
+- **Nushell** (`nixpkgs-nushell`, `pkgs.nushell`, a real ~50-crate
+  Cargo workspace): `buildPhase` **~7m40s → 1.3s** on a same-source
+  rebuild, 0/588 crates recompiled — the "go bigger" Rust test,
+  analogous to kubernetes for Go. Needed two fixes beyond the toy
+  `rust/` example's `-Zchecksum-freshness`: `nuke = false` (nuke-refs
+  corrupts compiled `build-script-build` ELF binaries in cargo's
+  `target/` dir) and a restore-side mtime fix (see below) — the toy
+  example, having zero dependencies, never exercised either path.
 - **LLVM** (`nixpkgs-llvm`, `pkgs.llvmPackages.llvm`, CMake/Ninja,
   ~4200 translation units): 98% real ccache hits on a same-source
   rebuild, `buildPhase` itself **35m17s → 1m20s (~26x)**.
@@ -62,6 +70,25 @@ restoring, not the deciding.
   `postPhases` phase that runs after everything else — confirmed via
   direct grep for real store-path hashes across the entire built
   output, not just build-log text.
+- **Found and fixed a real bug in this repo's own restore script,
+  Cargo-specific**: `mkIncrementalData`'s restore copied a prior
+  build's cache with plain `cp -r`, which stamps each file with the
+  real wall-clock time at the moment it's copied, in whatever order
+  `cp` walks the tree — not the actual build/dependency order.
+  Harmless for ccache/GOCACHE (content-hash keyed), but Cargo's
+  cross-crate staleness check compares a dependency's mtime against
+  its dependent's and recompiles if the dependency looks newer, so
+  copy-order noise alone caused spurious recompiles — confirmed on
+  `nixpkgs-nushell`, ~340/588 crates recompiled on a same-source warm
+  rebuild for no real reason. `--preserve=timestamps` isn't the fix
+  either: it keeps every restored file at the frozen epoch mtime Nix
+  normalizes store outputs to, which is then always older than the
+  vendor/source files already unpacked earlier in the same build,
+  breaking every build script's own staleness check the same way in
+  the other direction. Fixed with `touch -t` and one timestamp
+  captured up front, applied uniformly regardless of how many
+  `touch` invocations `find`'s argument batching needs — confirmed
+  0/588 crates recompiled after the fix.
 
 ## Using this as a library from another flake
 
@@ -197,6 +224,16 @@ for the same reason. `rust-staleness-self-test` (see
 restores a cache built from *different* source and asserts the binary
 isn't served stale.
 
+`.#nixpkgs-nushell` is the "go bigger" Rust test, a real ~50-crate
+Cargo workspace (`pkgs.nushell`) instead of the toy example's single
+crate — see "Real nixpkgs packages" for the numbers. It needed two
+fixes the toy example, having zero dependencies, never exercised:
+`nuke = false` (nuke-refs' text substitution corrupts compiled
+`build-script-build` ELF binaries in cargo's `target/` dir — their
+dynamic linker interpreter path gets rewritten, and cargo tries to
+re-execute the same cached, now-broken binary on the next build), and
+the restore-side mtime fix described above (see "Results").
+
 ### Haskell (`.#haskell`, `pkgs.haskellPackages.pandoc-cli`)
 
 ```
@@ -281,6 +318,7 @@ an estimate:
 | `nixpkgs-protobuf` | ccache only (CMake) | — | buildPhase ~6m cold; `doCheck` disabled (own test suite alone runs 15m+) |
 | `nixpkgs-opencv` | ccache only (CMake) | 99% | 27m26s → 6m14s (~4.4x) |
 | `nixpkgs-kubernetes` | `mkIncrementalGoPackage` (`$GOCACHE`, no ccache) | — | 14m43s → 4m17s (~3.4x) |
+| `nixpkgs-nushell` | `mkIncrementalRustPackage` (~50-crate workspace) | 0/588 crates recompiled | buildPhase ~7m40s → 1.3s |
 
 ```
 $ nix build .#nixpkgs-jq
@@ -289,13 +327,15 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-jq
 
 (same for `nixpkgs-redis`/`nixpkgs-tmux`/`nixpkgs-python3`/
 `nixpkgs-perl`/`nixpkgs-llvm`/`nixpkgs-fmt`/`nixpkgs-protobuf`/
-`nixpkgs-opencv`/`nixpkgs-kubernetes`; `nixpkgs-llvm`,
-`nixpkgs-opencv`, and `nixpkgs-kubernetes` aren't in CI — cold builds
-take 35+, ~27, and ~15 minutes respectively on 22 local cores.
-`nixpkgs-kubernetes` also has no hit-rate column above — it's
-`mkIncrementalGoPackage` restoring `$GOCACHE`, the same mechanism as
-the toy `.#golang` example, not ccache, so there's no per-file hit
-count to report; only wall-clock is measured.)
+`nixpkgs-opencv`/`nixpkgs-kubernetes`/`nixpkgs-nushell`; `nixpkgs-llvm`,
+`nixpkgs-opencv`, `nixpkgs-kubernetes`, and `nixpkgs-nushell` aren't in
+CI — cold builds take 35+, ~27, ~15, and ~11 minutes respectively on
+22 local cores. `nixpkgs-kubernetes` also has no hit-rate column
+above — it's `mkIncrementalGoPackage` restoring `$GOCACHE`, the same
+mechanism as the toy `.#golang` example, not ccache, so there's no
+per-file hit count to report; only wall-clock is measured.
+`nixpkgs-nushell` reports crates-recompiled instead of a ccache
+percentage for the same reason — Cargo, not ccache.)
 
 `tmux` hits 100% but only gets ~1.6x, and `llvm`'s `buildPhase` speedup
 (~26x) doesn't carry through to its overall wall-clock (~4.5x) —
@@ -339,6 +379,7 @@ $ nix build --override-input cache "git+file://$PWD?ref=HEAD" -L .#nixpkgs-jq-pa
 | `nixpkgs-protobuf-patched` | leaf `.cc` + its header, `repeated_field.{cc,h}` | 80/360 (22%) | — same "widely-included header" cost, at 10x the scale |
 | `nixpkgs-opencv-patched` | one line, `connectedcomponents.cpp` | 1855/1875 (98.9%) | 99.0% unpatched — a narrow leaf fix, not a header |
 | `nixpkgs-kubernetes-patched` | one leaf file, `cmd/kubeadm/.../config.go` | — (Go, no hits) | 4m49s vs. 4m17s same-source — the other 5 built components weren't invalidated |
+| `nixpkgs-nushell-patched` | one leaf file + its own test, `crates/nu-command/src/filesystem/umkdir.rs` | 584/588 unchanged (99.3%) | only the patched crate and its 3 dependents (`nu-cli`, `nu-lsp`, `nu`) recompiled |
 
 A header change costs proportionally more than a leaf-file one — not
 a bug, the same tradeoff any C/C++ build (cached or not) makes:
