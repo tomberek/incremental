@@ -39,20 +39,20 @@ build — no `--override-input`, no changes to the caller's `flake.nix`:
 {
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
   inputs.incremental.url = "github:tomberek/incremental";
-  outputs = { self, nixpkgs, incremental, ... }:
-    let pkgs = nixpkgs.legacyPackages.x86_64-linux;
-    in {
-      packages.x86_64-linux.default = incremental.lib.mkIncrementalGoPackage {
+  outputs = { self, nixpkgs, incremental, ... }: {
+    packages = builtins.mapAttrs (system: pkgs: {
+      default = incremental.lib.mkIncrementalGoPackage {
         name = "myapp";
-        system = "x86_64-linux";
-        inherit pkgs; # supplies nuke-refs
+        inherit system pkgs; # pkgs supplies nuke-refs
         drv = pkgs.buildGoModule {
           pname = "myapp";
+          version = "0.1.0";
           src = ./.;
           vendorHash = "...";
         };
       };
-    };
+    }) nixpkgs.legacyPackages;
+  };
 }
 ```
 
